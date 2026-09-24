@@ -72,22 +72,40 @@ export async function GET() {
     const admin = createClient(url, key, { auth: { autoRefreshToken: false, persistSession: false } });
 
     let synced = 0;
+    const errors: Array<{ row: number; name: string; error: string }> = [];
     for (const m of members) {
       // Google Sheet is the source of truth for name/job/power.
       // memo remains editable from the website, so a blank sheet memo never erases it.
-      const { data: existing } = await admin.from("members").select("id,memo").eq("name", m.name).maybeSingle();
+      const { data: existing, error: findError } = await admin.from("members").select("id,memo").eq("name", m.name).maybeSingle();
+      if (findError) {
+        errors.push({ row: m.row, name: m.name, error: findError.message });
+        continue;
+      }
       const payload: Record<string, unknown> = { name: m.name, job: m.job, power: m.power };
       if (m.memo) payload.memo = m.memo;
-      if (existing?.id) {
-        const { error } = await admin.from("members").update(payload).eq("id", existing.id);
-        if (!error) synced++;
+      const result = existing?.id
+        ? await admin.from("members").update(payload).eq("id", existing.id)
+        : await admin.from("members").insert(payload);
+      if (result.error) {
+        errors.push({ row: m.row, name: m.name, error: result.error.message });
       } else {
-        const { error } = await admin.from("members").insert(payload);
-        if (!error) synced++;
+        synced++;
       }
     }
 
-    return NextResponse.json({ ok: true, synced, members, sheet: { id: SHEET_ID, gid: SHEET_GID }, fetchedAt: new Date().toISOString() });
+    if (errors.length) {
+      return NextResponse.json({
+        ok: false,
+        error: `일부 길드원 저장에 실패했습니다. ${errors.length}건`,
+        synced,
+        rows: members.length,
+        failed: errors.length,
+        errors: errors.slice(0, 20),
+        sheet: { id: SHEET_ID, gid: SHEET_GID },
+      }, { status: 500 });
+    }
+
+    return NextResponse.json({ ok: true, synced, rows: members.length, members, sheet: { id: SHEET_ID, gid: SHEET_GID }, fetchedAt: new Date().toISOString() });
   } catch (error) {
     return NextResponse.json({ ok: false, error: error instanceof Error ? error.message : "Google Sheets 동기화 실패" }, { status: 500 });
   }

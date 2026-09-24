@@ -51,9 +51,22 @@ export default function GuildManager() {
 
   const load = async (syncSheet = false) => {
     setLoading(true);
-    // Google Sheets 동기화는 초기 로드/수동 새로고침/주기적 갱신 때만 실행합니다.
-    // Realtime 이벤트에서 다시 동기화하면 members 업데이트 → Realtime → load() 루프가 생길 수 있습니다.
-    if (syncSheet) { try { await fetch("/api/google-sheet/sync", { cache: "no-store" }); } catch {} }
+    // Google Sheets 동기화 결과를 숨기지 않고 사용자에게 알려줍니다.
+    // Realtime 이벤트에서는 동기화를 다시 실행하지 않아 무한 루프를 방지합니다.
+    if (syncSheet) {
+      try {
+        const response = await fetch("/api/google-sheet/sync", { cache: "no-store" });
+        let result: { ok?: boolean; error?: string; synced?: number; rows?: number; failed?: number } | null = null;
+        try { result = await response.json(); } catch {}
+        if (!response.ok || !result?.ok) {
+          window.alert(`❌ Google Sheets 연동 실패\n\n${result?.error || `서버 오류 (${response.status})`}`);
+        } else {
+          window.alert(`✅ Google Sheets 동기화 완료\n\n시트에서 ${result.rows ?? 0}명 확인\nSupabase에 ${result.synced ?? 0}명 반영`);
+        }
+      } catch (error) {
+        window.alert(`❌ Google Sheets 연동 실패\n\n${error instanceof Error ? error.message : "네트워크 오류"}`);
+      }
+    }
     const [{ data: members, error: membersError }, { data: records, error: recordsError }, { data: distributions, error: distributionError }, { data: memos, error: memosError }, { data: attendance, error: attendanceError }] = await Promise.all([
       supabase.from("members").select("*").order("name"),
       supabase.from("boss_records").select("*").order("date", { ascending: false }),
