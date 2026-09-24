@@ -64,6 +64,14 @@ export default function GuildManager() {
     }
   };
 
+  const refreshAttendance = async () => {
+    const { data: attendance } = await supabase
+      .from("attendance")
+      .select("*")
+      .order("attendance_date", { ascending: false });
+    if (attendance) setData(d => ({ ...d, attendance: attendance as Attendance[] }));
+  };
+
   const load = async (syncSheet = false) => {
     setLoading(true);
     // 수동 시트 동기화는 길드원 정보 + 출석/보스 기록을 한 번에 반영합니다.
@@ -110,8 +118,9 @@ export default function GuildManager() {
     // 최초 진입 시 출석 기록은 조용히 한 번 동기화하고, 이후에도 30초마다
     // Google Sheets의 출석/보스 기록만 백그라운드에서 확인합니다.
     void syncAttendanceSilently().then(() => load(false));
-    const attendanceTimer = window.setInterval(() => {
-      void syncAttendanceSilently();
+    const attendanceTimer = window.setInterval(async () => {
+      const synced = await syncAttendanceSilently();
+      if (synced) await refreshAttendance();
     }, 30000);
     const channel = supabase.channel("guild-live")
       .on("postgres_changes", { event: "*", schema: "public", table: "members" }, () => { void load(false); })

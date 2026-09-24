@@ -70,7 +70,10 @@ SUPABASE_SERVICE_ROLE_KEY=...
 ```env
 GOOGLE_SHEET_ID=...
 GOOGLE_SHEET_GID=...
+GOOGLE_ATTENDANCE_SHEET_GID=400265627
 ```
+
+`GOOGLE_ATTENDANCE_SHEET_GID`는 **출석 기록** 탭의 GID입니다. 현재 사용 중인 출석 기록 탭은 `400265627`입니다.
 
 기본값은 위의 ECLIPSE 시트 ID/GID가 들어 있습니다.
 

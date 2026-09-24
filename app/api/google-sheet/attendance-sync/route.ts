@@ -7,7 +7,7 @@ export const revalidate = 0;
 
 const SHEET_ID = process.env.GOOGLE_SHEET_ID || "10TUvN2-5otNh22h8ABDT3bzek6anbUxeJhjodvBfQzE";
 // '출석 기록' 탭의 GID (봇이 사용하는 출석 기록 시트)
-const ATTENDANCE_SHEET_GID = process.env.GOOGLE_ATTENDANCE_SHEET_GID || "1397643408";
+const ATTENDANCE_SHEET_GID = process.env.GOOGLE_ATTENDANCE_SHEET_GID || "400265627";
 const CSV_URL = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/export?format=csv&gid=${ATTENDANCE_SHEET_GID}`;
 
 function parseCsv(text: string): string[][] {
@@ -49,13 +49,27 @@ function findHeader(headers: string[], names: string[], tokens: string[] = []) {
 }
 
 function parseDateTime(value: string): { date: string; time: string } | null {
-  const v = value.trim().replace(/\//g, "-");
-  const m = v.match(/(\d{4})-(\d{1,2})-(\d{1,2})\s+(\d{1,2}):(\d{2})(?::(\d{2}))?/);
+  let v = value.trim();
+  if (!v) return null;
+
+  // Google Sheets may export dates differently depending on the sheet locale.
+  // Support both ISO-like values and Korean locale values such as
+  // "2026. 9. 24 오후 9:10:00" / "2026-09-24 21:10:00".
+  v = v.replace(/\./g, "-").replace(/\s+/g, " ").trim();
+
+  const m = v.match(/(\d{4})-(\d{1,2})-(\d{1,2})\s*(오전|오후|AM|PM)?\s*(\d{1,2})(?::(\d{2}))?(?::(\d{2}))?/i);
   if (!m) return null;
-  const [, y, mo, d, hh, mm, ss = "00"] = m;
+
+  const [, y, mo, d, periodRaw, hhRaw, mmRaw = "00", ssRaw = "00"] = m;
+  let hh = Number(hhRaw);
+  const period = String(periodRaw || "").toLowerCase();
+  if ((period === "오후" || period === "pm") && hh < 12) hh += 12;
+  if ((period === "오전" || period === "am") && hh === 12) hh = 0;
+  if (hh > 23 || Number(mmRaw) > 59 || Number(ssRaw) > 59) return null;
+
   return {
     date: `${y}-${mo.padStart(2, "0")}-${d.padStart(2, "0")}`,
-    time: `${hh.padStart(2, "0")}:${mm}:${ss}`,
+    time: `${String(hh).padStart(2, "0")}:${mmRaw.padStart(2, "0")}:${ssRaw.padStart(2, "0")}`,
   };
 }
 
@@ -111,11 +125,26 @@ export async function GET() {
     let attendanceSynced = 0;
     const errors: string[] = [];
 
+    // 출석 기록 시트는 보통 "한 행 = 한 참여자" 구조입니다.
+    // 같은 보스/젠 시간의 여러 행을 하나의 보스 기록으로 합쳐야
+    // 마지막 참여자만 남는 문제가 생기지 않습니다.
+    const bossGroups = new Map<string, {
+      boss: string;
+      spawnRaw: string;
+      dt: { date: string; time: string };
+      participants: string[];
+      scoreValues: number[];
+      attendedDates: string[];
+    }>();
+
     for (let i = 1; i < rows.length; i++) {
       const r = rows[i];
       const boss = String(r[bossIdx] ?? "").trim();
       const spawnRaw = String(r[spawnIdx] ?? "").trim();
-      const participants = String(r[participantsIdx] ?? "").split(",").map(v => v.trim()).filter(Boolean);
+      const participants = String(r[participantsIdx] ?? "")
+        .split(",")
+        .map(v => v.trim())
+        .filter(Boolean);
       if (!boss || !spawnRaw || !participants.length) continue;
 
       const dt = parseDateTime(spawnRaw);
@@ -124,8 +153,29 @@ export async function GET() {
         continue;
       }
 
+      const attendedRaw = attendedIdx >= 0 ? String(r[attendedIdx] ?? "").trim() : "";
+      const attendedDate = parseDateTime(attendedRaw)?.date || dt.date;
+      const key = `${boss}|${spawnRaw}`;
+      const group = bossGroups.get(key) || {
+        boss, spawnRaw, dt, participants: [], scoreValues: [], attendedDates: [],
+      };
+
+      for (const name of participants) {
+        if (!group.participants.includes(name)) group.participants.push(name);
+      }
+      if (attendedDate) group.attendedDates.push(attendedDate);
+
       const scoreRaw = scoreIdx >= 0 ? String(r[scoreIdx] ?? "").replace(/[,_\s]/g, "") : "";
-      const score = Number(scoreRaw) || participants.length;
+      const rowScore = Number(scoreRaw);
+      if (Number.isFinite(rowScore) && rowScore > 0) group.scoreValues.push(rowScore);
+      bossGroups.set(key, group);
+    }
+
+    for (const group of bossGroups.values()) {
+      const { boss, spawnRaw, dt, participants } = group;
+      // 참여 점수가 행마다 반복되는 경우에는 중복 합산하지 않도록 최대값을 사용하고,
+      // 값이 없으면 참여 인원 수를 기본 점수로 사용합니다.
+      const score = group.scoreValues.length ? Math.max(...group.scoreValues) : participants.length;
       const id = deterministicUuid(`${boss}|${spawnRaw}`);
       const record = {
         id,
@@ -138,24 +188,27 @@ export async function GET() {
 
       const { error } = await admin.from("boss_records").upsert(record, { onConflict: "id" });
       if (error) {
-        errors.push(`행 ${i + 1} ${boss}: ${error.message}`);
+        errors.push(`${boss}: ${error.message}`);
         continue;
       }
       synced++;
 
       // 사이트의 'Discord 출석'도 시트에서 함께 채웁니다.
-      const attendedRaw = attendedIdx >= 0 ? String(r[attendedIdx] ?? "").trim() : "";
-      const attendedDate = parseDateTime(attendedRaw)?.date || dt.date;
+      // 같은 사람이 같은 날짜에 여러 보스에 참여해도 출석은 1회로 유지합니다.
+      const attendedDates = [...new Set(group.attendedDates.length ? group.attendedDates : [dt.date])];
       for (const name of participants) {
-        const { error: attendanceError } = await admin.from("attendance").upsert({
-          member_name: name,
-          discord_user_id: "",
-          discord_display_name: name,
-          attendance_date: attendedDate,
-          status: "present",
-          source: "google_sheet",
-        }, { onConflict: "member_name,attendance_date" });
-        if (!attendanceError) attendanceSynced++;
+        for (const attendedDate of attendedDates) {
+          const { error: attendanceError } = await admin.from("attendance").upsert({
+            member_name: name,
+            discord_user_id: "",
+            discord_display_name: name,
+            attendance_date: attendedDate,
+            status: "present",
+            source: "google_sheet",
+          }, { onConflict: "member_name,attendance_date" });
+          if (!attendanceError) attendanceSynced++;
+          else errors.push(`${name} ${attendedDate}: ${attendanceError.message}`);
+        }
       }
     }
 
