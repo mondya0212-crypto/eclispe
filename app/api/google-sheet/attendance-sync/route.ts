@@ -94,7 +94,7 @@ export async function GET() {
       return NextResponse.json({ ok: false, error: "SUPABASE_SERVICE_ROLE_KEY 환경변수가 없습니다." }, { status: 500 });
     }
 
-    const response = await fetch(CSV_URL, { cache: "no-store" });
+    const response = await fetch(`${CSV_URL}&_ts=${Date.now()}`, { cache: "no-store" });
     if (!response.ok) {
       return NextResponse.json({ ok: false, error: `Google Sheets 출석 기록 응답 오류: ${response.status}` }, { status: 502 });
     }

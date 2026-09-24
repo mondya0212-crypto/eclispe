@@ -170,19 +170,20 @@ export default function GuildManager() {
 
   useEffect(() => {
     // 최초 데이터 로딩 후, Google Sheets의 길드원 명단과 출석 기록을
-    // 30초마다 화면 깜빡임 없이 백그라운드에서 조용히 동기화합니다.
+    // 5초마다 화면 깜빡임 없이 백그라운드에서 조용히 동기화합니다.
     let stopped = false;
     let timer: number | undefined;
 
-    // 한 번의 동기화가 끝난 뒤 30초를 기다립니다.
-    // setInterval로 고정 주기를 돌리지 않아 동기화 요청이 겹치지 않습니다.
+    // 한 번의 동기화가 끝난 뒤 5초를 기다립니다.
+    // Google Sheets는 push 이벤트를 제공하지 않으므로 짧은 폴링으로
+    // 시트 변경을 거의 실시간으로 반영하고, 동기화가 겹치지 않도록 합니다.
     const runBackgroundSync = async () => {
       if (stopped) return;
       const synced = await syncSheetsSilently();
       if (stopped) return;
       // 시트가 성공했든 실패했든 화면 데이터는 조용히 확인합니다.
       if (synced) await refreshDataSilently();
-      if (!stopped) timer = window.setTimeout(() => { void runBackgroundSync(); }, 30000);
+      if (!stopped) timer = window.setTimeout(() => { void runBackgroundSync(); }, 5000);
     };
 
     // 첫 화면은 Supabase 데이터만 즉시 읽어 띄우고, 시트 동기화는 화면 뒤에서 시작합니다.
@@ -191,6 +192,17 @@ export default function GuildManager() {
       if (!stopped) setLoading(false);
       void runBackgroundSync();
     })();
+
+    const onVisibilityOrFocus = () => {
+      if (document.visibilityState === "visible") {
+        void (async () => {
+          const synced = await syncSheetsSilently();
+          if (synced) await refreshDataSilently();
+        })();
+      }
+    };
+    document.addEventListener("visibilitychange", onVisibilityOrFocus);
+    window.addEventListener("focus", onVisibilityOrFocus);
 
     const channel = supabase.channel("guild-live")
       .on("postgres_changes", { event: "*", schema: "public", table: "members" }, () => { void refreshDataSilently(); })
@@ -202,6 +214,8 @@ export default function GuildManager() {
     return () => {
       stopped = true;
       if (timer !== undefined) window.clearTimeout(timer);
+      document.removeEventListener("visibilitychange", onVisibilityOrFocus);
+      window.removeEventListener("focus", onVisibilityOrFocus);
       void supabase.removeChannel(channel);
     };
   }, []);

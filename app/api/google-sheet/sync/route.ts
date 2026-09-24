@@ -57,7 +57,7 @@ function headerIndex(headers: string[], names: string[], containsTokens: string[
 
 export async function GET() {
   try {
-    const response = await fetch(CSV_URL, { cache: "no-store" });
+    const response = await fetch(`${CSV_URL}&_ts=${Date.now()}`, { cache: "no-store" });
     if (!response.ok) return NextResponse.json({ ok: false, error: `Google Sheets 응답 오류: ${response.status}` }, { status: 502 });
     const text = await response.text();
     if (!text || text.trim().startsWith("<!DOCTYPE") || text.includes("Sign in")) {
