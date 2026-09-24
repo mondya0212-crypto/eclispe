@@ -81,10 +81,14 @@ function formatSpawnTime(value?: string | null) {
 }
 
 function uniqueBossRecords(records: BossRecord[]) {
+  // 같은 날짜/보스라도 젠 시간이 다르면 서로 다른 보스 기록입니다.
+  // 기존 코드는 참여자 목록만으로 중복 제거해서,
+  // 젠 시간이 정상적으로 들어온 시트 기록이 기존 '-' 기록에 가려질 수 있었습니다.
+  // 이제 날짜 + 보스 + 젠 시간을 기준으로만 중복 제거합니다.
   const seen = new Set<string>();
   return records.filter(r => {
-    const participants = [...(r.participants || [])].map(v => v.trim()).filter(Boolean).sort().join("|");
-    const key = `${r.date}|${r.boss.trim()}|${participants}`;
+    const spawn = String(r.spawn_time ?? "").trim();
+    const key = `${r.date}|${r.boss.trim()}|${spawn}`;
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
