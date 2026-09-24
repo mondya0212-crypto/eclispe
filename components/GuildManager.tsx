@@ -42,16 +42,6 @@ function requireAdmin(): boolean {
 
 function formatNumber(value: number) { return Number(value || 0).toLocaleString("ko-KR"); }
 
-function formatSpawnTime(value?: string | null) {
-  if (!value) return "-";
-  const v = String(value).trim();
-  // 이미 DB에 저장된 YYYY-MM-DD HH:mm:ss / YYYY-MM-DDTHH:mm:ss 값은
-  // 그대로 보여주되, 초 단위가 없는 경우에도 정상 표시합니다.
-  const m = v.match(/^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}(?::\d{2})?)/);
-  if (m) return `${m[1]} ${m[2]}`;
-  return v;
-}
-
 function uniqueBossRecords(records: BossRecord[]) {
   const seen = new Set<string>();
   return records.filter(r => {
@@ -432,7 +422,7 @@ function BossRecords({ data, setData }: { data: AppData; setData: React.Dispatch
   const toggle = (name: string) => setSelected(s => s.includes(name) ? s.filter(x => x !== name) : [...s, name]);
   return <div className="stack"><PageIntro title="⚔️ 보스 참여 기록" desc="보스별 참여자를 저장하고 수정할 수 있습니다." />
     <div className="panel"><div className="panel-title"><span>➕ 참여 기록 추가</span><button className="danger-outline small" onClick={resetAll}><Lock size={13} /> 전체 초기화</button></div><div className="form-grid boss-form"><input type="date" value={date} onChange={e => setDate(e.target.value)} /><input placeholder="보스 이름" value={boss} onChange={e => setBoss(e.target.value)} /><input type="datetime-local" value={spawnTime} onChange={e => setSpawnTime(e.target.value)} /><input type="number" placeholder="보스 점수" value={score} onChange={e => setScore(e.target.value)} /></div><div className="member-picker">{data.members.map(m => <button key={m.id} className={selected.includes(m.name) ? "selected" : ""} onClick={() => toggle(m.name)}>{m.name}</button>)}</div><button className="primary" disabled={saving} onClick={add}><Plus size={16} /> {saving ? "저장 중..." : `참여 기록 저장 (${selected.length}명)`}</button></div>
-    <div className="panel table-panel"><div className="table-wrap"><table className="boss-table"><thead><tr><th>날짜</th><th>보스</th><th>젠 시간</th><th>점수</th><th>참여자</th><th>관리</th></tr></thead><tbody>{data.records.map(r => <tr key={r.id}><td>{r.date}</td><td className="strong">{r.boss}</td><td className="spawn-time-cell">{formatSpawnTime(r.spawn_time)}</td><td>{formatNumber(r.score)}</td><td>{r.participants?.length ? r.participants.join(", ") : "-"}</td><td><div className="actions"><button title="수정" onClick={() => startEdit(r)}><Pencil size={14} /></button><button title="삭제" className="danger" onClick={() => del(r.id)}><Trash2 size={14} /></button></div></td></tr>)}</tbody></table></div>{!data.records.length && <Empty text="등록된 기록이 없습니다." />}</div>
+    <div className="panel table-panel"><div className="table-wrap"><table className="boss-table"><thead><tr><th>날짜</th><th>보스</th><th>젠 시간</th><th>점수</th><th>참여자</th><th>관리</th></tr></thead><tbody>{data.records.map(r => <tr key={r.id}><td>{r.date}</td><td className="strong">{r.boss}</td><td>{r.spawn_time || "-"}</td><td>{formatNumber(r.score)}</td><td>{r.participants?.length ? r.participants.join(", ") : "-"}</td><td><div className="actions"><button title="수정" onClick={() => startEdit(r)}><Pencil size={14} /></button><button title="삭제" className="danger" onClick={() => del(r.id)}><Trash2 size={14} /></button></div></td></tr>)}</tbody></table></div>{!data.records.length && <Empty text="등록된 기록이 없습니다." />}</div>
     {editing && <div className="modal-backdrop" onMouseDown={e => { if (e.target === e.currentTarget) resetEdit(); }}><div className="member-edit-modal boss-edit-modal"><div className="modal-head"><div><div className="eyebrow">ECLIPSE BOSS RECORD</div><h3>✏️ 보스 참여 기록 수정</h3></div><button className="icon-btn" onClick={resetEdit}><X size={20} /></button></div><div className="edit-grid"><label>날짜<input type="date" value={date} onChange={e => setDate(e.target.value)} /></label><label>보스 이름<input value={boss} onChange={e => setBoss(e.target.value)} /></label><label>젠 시간<input type="datetime-local" value={spawnTime} onChange={e => setSpawnTime(e.target.value)} /></label><label>보스 점수<input type="number" value={score} onChange={e => setScore(e.target.value)} /></label></div><div className="boss-edit-participants"><span>참여자</span><div className="member-picker">{data.members.map(m => <button key={m.id} className={selected.includes(m.name) ? "selected" : ""} onClick={() => toggle(m.name)}>{m.name}</button>)}</div></div><div className="modal-actions"><button className="secondary" onClick={resetEdit}>취소</button><button className="primary" disabled={saving} onClick={saveEdit}>{saving ? "저장 중..." : "수정 저장"}</button></div></div></div>}
   </div>;
 }

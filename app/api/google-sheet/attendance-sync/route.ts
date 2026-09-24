@@ -49,25 +49,38 @@ function findHeader(headers: string[], names: string[], tokens: string[] = []) {
 }
 
 function parseDateTime(value: string): { date: string; time: string } | null {
-  let v = value.trim();
+  let v = String(value ?? "").trim();
   if (!v) return null;
 
-  // Google Sheets may export dates differently depending on the sheet locale.
-  // Support both ISO-like values and Korean locale values such as
-  // "2026. 9. 24 오후 9:10:00" / "2026-09-24 21:10:00".
-  v = v.replace(/[.\/]/g, "-").replace(/T/g, " ").replace(/\s+/g, " ").trim();
-
-  // Sheets CSV can return values like:
+  // Google Sheets CSV exports can use several locale-dependent formats.
+  // Examples:
   // 2026. 9. 24 오후 9:10:00
   // 2026-09-24 21:10:00
-  // 2026-09-24T21:10:00+09:00
-  // 2026-09-24 21:10
-  const m = v.match(/(\d{4})-(\d{1,2})-(\d{1,2})(?:\s+|$)(오전|오후|AM|PM)?\s*(\d{1,2})(?::(\d{2}))?(?::(\d{2}))?/i);
+  // 9/24/2026 21:10:00
+  // 09/24/2026 9:10:00 PM
+  v = v.replace(/\u00a0/g, " ").replace(/\s+/g, " ").trim();
+
+  let m = v.match(/^(\d{4})[.\-/](\d{1,2})[.\-/](\d{1,2})(?:\s+|T)(오전|오후|AM|PM)?\s*(\d{1,2})(?::(\d{2}))?(?::(\d{2}))?/i);
   if (!m) {
-    // Fallback for ISO strings containing a timezone offset.
-    const iso = v.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?/);
-    if (!iso) return null;
-    return { date: `${iso[1]}-${iso[2]}-${iso[3]}`, time: `${iso[4]}:${iso[5]}:${iso[6] || "00"}` };
+    // US-style month/day/year export from Google Sheets.
+    m = v.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{4})(?:\s+|T)(오전|오후|AM|PM)?\s*(\d{1,2})(?::(\d{2}))?(?::(\d{2}))?/i);
+    if (m) {
+      const [, mo, d, y, periodRaw, hhRaw, mmRaw = "00", ssRaw = "00"] = m;
+      let hh = Number(hhRaw);
+      const period = String(periodRaw || "").toLowerCase();
+      if ((period === "오후" || period === "pm") && hh < 12) hh += 12;
+      if ((period === "오전" || period === "am") && hh === 12) hh = 0;
+      if (hh > 23 || Number(mmRaw) > 59 || Number(ssRaw) > 59 || Number(mo) < 1 || Number(mo) > 12 || Number(d) < 1 || Number(d) > 31) return null;
+      return {
+        date: `${y}-${String(mo).padStart(2, "0")}-${String(d).padStart(2, "0")}`,
+        time: `${String(hh).padStart(2, "0")}:${String(mmRaw).padStart(2, "0")}:${String(ssRaw).padStart(2, "0")}`,
+      };
+    }
+  }
+
+  if (!m) {
+    // Date-only values are not enough for the spawn-time field.
+    return null;
   }
 
   const [, y, mo, d, periodRaw, hhRaw, mmRaw = "00", ssRaw = "00"] = m;
@@ -75,14 +88,13 @@ function parseDateTime(value: string): { date: string; time: string } | null {
   const period = String(periodRaw || "").toLowerCase();
   if ((period === "오후" || period === "pm") && hh < 12) hh += 12;
   if ((period === "오전" || period === "am") && hh === 12) hh = 0;
-  if (hh > 23 || Number(mmRaw) > 59 || Number(ssRaw) > 59) return null;
+  if (hh > 23 || Number(mmRaw) > 59 || Number(ssRaw) > 59 || Number(mo) < 1 || Number(mo) > 12 || Number(d) < 1 || Number(d) > 31) return null;
 
   return {
-    date: `${y}-${mo.padStart(2, "0")}-${d.padStart(2, "0")}`,
-    time: `${String(hh).padStart(2, "0")}:${mmRaw.padStart(2, "0")}:${ssRaw.padStart(2, "0")}`,
+    date: `${y}-${String(mo).padStart(2, "0")}-${String(d).padStart(2, "0")}`,
+    time: `${String(hh).padStart(2, "0")}:${String(mmRaw).padStart(2, "0")}:${String(ssRaw).padStart(2, "0")}`,
   };
 }
-
 function weekOfMonth(date: string) {
   const day = Number(date.slice(8, 10));
   return Math.min(5, Math.max(1, Math.ceil(day / 7)));
