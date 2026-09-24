@@ -184,3 +184,19 @@
   .ladder-result .result-card{padding:10px 7px}
 }
 @media(max-width:360px){.ladder-result .result-grid{grid-template-columns:1fr}}
+
+/* v20: guild member registration tablet input overflow fix */
+.member-add-grid{min-width:0}
+.member-add-grid > input,
+.member-add-grid > textarea,
+.member-add-grid > button{min-width:0;max-width:100%;box-sizing:border-box}
+@media (min-width:601px) and (max-width:1200px){
+  .member-add-grid{grid-template-columns:minmax(0,1fr) minmax(0,1fr)!important}
+  .member-add-grid .primary{grid-column:span 1!important;width:100%;min-width:0}
+  .member-add-grid > input{width:100%;min-width:0}
+}
+@media (max-width:600px){
+  .member-add-grid{grid-template-columns:minmax(0,1fr)!important;width:100%;min-width:0}
+  .member-add-grid > input{width:100%;min-width:0}
+  .member-add-grid .primary{width:100%;min-width:0}
+}
