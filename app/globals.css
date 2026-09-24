@@ -116,3 +116,23 @@
 .member-add-grid{grid-template-columns:1.1fr 1fr 1fr auto}
 @media(max-width:900px){.member-add-grid{grid-template-columns:1fr 1fr}.member-add-grid .primary{grid-column:1/-1}}
 @media(max-width:600px){.member-add-grid{grid-template-columns:1fr}.member-add-grid .primary{grid-column:auto}.member-power-display{padding:12px 13px}.member-power-display strong{font-size:18px}}
+
+
+/* v17: 분배금 정산 칸 잘림 방지 + 가로 스크롤 */
+.distribution-settlement-panel{min-width:0}
+.settlement-list{overflow-x:auto;overflow-y:visible;padding:0 10px 4px}
+.settlement-row{min-width:860px}
+.settlement-name,.settlement-base,.settlement-bonus,.settlement-amount,.payment-button{box-sizing:border-box}
+.settlement-name{overflow:hidden}
+.settlement-base strong,.settlement-amount strong{white-space:nowrap}
+.settlement-bonus{overflow:visible}
+.distribution-control-card input{width:100%;box-sizing:border-box}
+@media(max-width:600px){
+  .settlement-list{overflow-x:auto;-webkit-overflow-scrolling:touch;padding:0 8px 6px}
+  .settlement-row{min-width:720px!important;display:grid!important;grid-template-columns:170px 145px 165px 120px 95px!important;gap:9px!important;padding:12px 7px!important}
+  .settlement-name{grid-column:auto!important}
+  .settlement-base{grid-column:auto!important}
+  .settlement-bonus{grid-column:auto!important;width:auto!important;min-width:0!important}
+  .settlement-amount{grid-column:auto!important;align-items:flex-end!important}
+  .payment-button{grid-column:auto!important;width:95px!important}
+}

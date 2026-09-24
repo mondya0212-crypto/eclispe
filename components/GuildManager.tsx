@@ -250,7 +250,7 @@ function StatCard({ icon, label, value, accent = "purple" }: { icon: React.React
 function Dashboard({ data }: { data: AppData }) {
   const avgPower = data.members.length ? Math.round(data.members.reduce((sum, m) => sum + totalPower(m), 0) / data.members.length) : 0;
   const guildPower = data.members.reduce((sum, m) => sum + totalPower(m), 0);
-  const totalParticipation = data.records.reduce((sum, r) => sum + (r.participants?.length || 0), 0);
+  const totalParticipation = data.records.length;
   const totalDistribution = data.distributions.reduce((sum, r) => sum + (Number(r.amount) || 0), 0);
   return <div className="stack">
     <PageIntro title="🌷 길드 대시보드" desc="길드 현황과 주요 기록을 한눈에 확인할 수 있습니다." />
@@ -263,7 +263,7 @@ function Dashboard({ data }: { data: AppData }) {
       <div className="panel"><div className="panel-title"><span>⚔️ 최근 보스 기록</span><span className="muted">총 {data.records.length}건</span></div>
         {data.records.length ? <div className="table-wrap"><table className="dashboard-table"><thead><tr><th>날짜</th><th>보스</th><th>점수</th><th>참여</th></tr></thead><tbody>{data.records.slice(0, 7).map(r => <tr key={r.id}><td>{r.date}</td><td className="strong">{r.boss}</td><td>{formatNumber(r.score)}</td><td>{r.participants?.length || 0}명</td></tr>)}</tbody></table></div> : <Empty text="등록된 보스 기록이 없습니다." />}
       </div>
-      <div className="panel"><div className="panel-title"><span>💰 분배금 현황</span><b>{formatNumber(totalDistribution)} D</b></div><div className="soft-summary"><span>누적 참여 횟수</span><strong>{totalParticipation}회</strong></div>{data.distributions.length ? <div className="simple-list">{data.distributions.slice(0, 5).map(r => <div key={r.id}><span>{r.recipient}</span><b>{formatNumber(r.amount)} D</b></div>)}</div> : <Empty text="등록된 분배금 내역이 없습니다." />}</div>
+      <div className="panel"><div className="panel-title"><span>💰 분배금 현황</span><b>{formatNumber(totalDistribution)} D</b></div><div className="soft-summary"><span>누적 보스 횟수</span><strong>{totalParticipation}회</strong></div>{data.distributions.length ? <div className="simple-list">{data.distributions.slice(0, 5).map(r => <div key={r.id}><span>{r.recipient}</span><b>{formatNumber(r.amount)} D</b></div>)}</div> : <Empty text="등록된 분배금 내역이 없습니다." />}</div>
     </div>
   </div>;
 }
@@ -417,7 +417,7 @@ function BossRecords({ data, setData }: { data: AppData; setData: React.Dispatch
 }
 
 function Distribution({ data, setData }: { data: AppData; setData: React.Dispatch<React.SetStateAction<AppData>> }) {
-  const [totalPool, setTotalPool] = useState("300000");
+  const [totalPool, setTotalPool] = useState("0");
   const [ratio, setRatio] = useState("100");
   const [saving, setSaving] = useState(false);
   const [sort, setSort] = useState<"high" | "low">("high");
