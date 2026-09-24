@@ -11,10 +11,10 @@ type Member = {
   id: string; name: string; job: string; power: number; defense?: number; accuracy?: number;
   created_at?: string; memo?: string | null;
 };
-type BossRecord = { id: string; week: number; date: string; boss: string; score: number; participants: string[]; spawn_time?: string | null };
+type BossRecord = { id: string; week: number; date: string; boss: string; score: number; participants: string[] };
 type DistributionRecord = { id: string; date: string; recipient: string; amount: number; reason: string; memo?: string | null };
 type AdminMemo = { id: string; title: string; content: string; created_at: string; updated_at: string };
-type Attendance = { id: string; member_name: string; discord_user_id?: string | null; discord_display_name?: string | null; attendance_date: string; attendance_time?: string | null; status: string; source: string; created_at: string };
+type Attendance = { id: string; member_name: string; discord_user_id?: string | null; discord_display_name?: string | null; attendance_date: string; status: string; source: string; created_at: string };
 type AppData = { members: Member[]; records: BossRecord[]; distributions: DistributionRecord[]; memos: AdminMemo[]; attendance: Attendance[] };
 
 type MenuKey = "dashboard" | "members" | "boss" | "distribution" | "stats" | "memo" | "ladder";
@@ -41,34 +41,18 @@ function requireAdmin(): boolean {
 }
 
 function formatNumber(value: number) { return Number(value || 0).toLocaleString("ko-KR"); }
+
+function uniqueBossRecords(records: BossRecord[]) {
+  const seen = new Set<string>();
+  return records.filter(r => {
+    const participants = [...(r.participants || [])].map(v => v.trim()).filter(Boolean).sort().join("|");
+    const key = `${r.date}|${r.boss.trim()}|${participants}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
 function totalPower(m: Member) { return Number(m.power) || 0; }
-
-// 보스 기록은 날짜뿐 아니라 실제 젠 시간까지 기준으로 정렬합니다.
-// 시트에서 들어온 시간이 HH:mm:ss / HH:mm / 오전·오후 형식이어도 비교할 수 있게 합니다.
-function bossSortTimestamp(r: BossRecord) {
-  const date = String(r.date || "").trim();
-  const raw = String(r.spawn_time || "").trim();
-  if (!date && !raw) return 0;
-  let time = raw;
-  const ampm = raw.match(/^(오전|오후)\s*(\d{1,2})(?::(\d{2}))?(?::(\d{2}))?$/);
-  if (ampm) {
-    let h = Number(ampm[2]);
-    const m = Number(ampm[3] || 0);
-    const sec = Number(ampm[4] || 0);
-    if (ampm[1] === "오후" && h < 12) h += 12;
-    if (ampm[1] === "오전" && h === 12) h = 0;
-    time = `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`;
-  }
-  const normalizedDate = date.replace(/[.\/]/g, "-").replace(/\s+/g, "").slice(0, 10);
-  const match = time.match(/(\d{1,2}):(\d{2})(?::(\d{2}))?/);
-  const seconds = match ? Number(match[1]) * 3600 + Number(match[2]) * 60 + Number(match[3] || 0) : -1;
-  const dateNum = normalizedDate ? Date.parse(normalizedDate) : 0;
-  return (Number.isNaN(dateNum) ? 0 : dateNum) + Math.max(seconds, 0) * 1000;
-}
-
-function sortBossRecords(records: BossRecord[]) {
-  return [...records].sort((a, b) => bossSortTimestamp(b) - bossSortTimestamp(a));
-}
 
 export default function GuildManager() {
   const [active, setActive] = useState<MenuKey>("dashboard");
@@ -79,7 +63,6 @@ export default function GuildManager() {
   // 자동 동기화가 겹치지 않도록 잠금합니다.
   const syncInProgressRef = useRef(false);
   const refreshInProgressRef = useRef(false);
-  const lastMemberSyncAtRef = useRef(0);
 
   const fetchWithTimeout = async (url: string, timeoutMs = 15000) => {
     const controller = new AbortController();
@@ -97,35 +80,25 @@ export default function GuildManager() {
     syncInProgressRef.current = true;
 
     try {
-      // 두 동기화는 서로 독립적으로 실행합니다.
-      // 길드원 시트에 문제가 있어도 보스/출석 시트는 반드시 읽습니다.
-      const now = Date.now();
-      // 보스/출석은 5초마다 확인하고, 길드원 명단은 30초마다 확인합니다.
-      // 길드원 명단까지 매번 읽으면 불필요한 Google Sheets 요청이 반복됩니다.
-      const shouldSyncMembers = now - lastMemberSyncAtRef.current >= 30000;
-      const requests: Promise<Response>[] = [
-        fetchWithTimeout(`/api/google-sheet/attendance-sync?_ts=${now}`),
-      ];
-      if (shouldSyncMembers) {
-        lastMemberSyncAtRef.current = now;
-        requests.push(fetchWithTimeout(`/api/google-sheet/sync?_ts=${now}`));
-      }
-      const responses = await Promise.all(requests);
-      const attendanceResponse = responses[0];
-      const memberResponse = shouldSyncMembers ? responses[1] : null;
-      const attendanceResult = await attendanceResponse.json().catch(() => null);
-      const memberResult = memberResponse ? await memberResponse.json().catch(() => null) : null;
+      // 두 API를 동시에 호출하지 않고 순차 처리합니다.
+      // 길드원 동기화가 끝난 뒤 출석 기록을 동기화합니다.
+      const memberResponse = await fetchWithTimeout("/api/google-sheet/sync");
+      const memberResult = await memberResponse.json().catch(() => null);
 
-      if (memberResponse && (!memberResponse.ok || !memberResult?.ok)) {
+      if (!memberResponse.ok || !memberResult?.ok) {
         console.warn("Google Sheets 길드원 명단 자동 동기화 실패:", memberResult?.error || memberResponse.status);
-      }
-      if (!attendanceResponse.ok || !attendanceResult?.ok) {
-        console.warn("Google Sheets 출석/보스 자동 동기화 실패:", attendanceResult?.error || attendanceResponse.status);
+        return false;
       }
 
-      // 둘 중 하나라도 실제 시트를 읽고 처리했다면 Supabase를 다시 읽습니다.
-      // 한쪽 API의 일부 오류 때문에 다른 쪽 보스 기록이 화면에서 사라지지 않게 합니다.
-      return Boolean(memberResponse || attendanceResult?.ok || attendanceResult?.synced > 0);
+      const attendanceResponse = await fetchWithTimeout("/api/google-sheet/attendance-sync");
+      const attendanceResult = await attendanceResponse.json().catch(() => null);
+
+      if (!attendanceResponse.ok || !attendanceResult?.ok) {
+        console.warn("Google Sheets 출석 기록 자동 동기화 실패:", attendanceResult?.error || attendanceResponse.status);
+        return false;
+      }
+
+      return true;
     } catch (error) {
       // 자동 동기화 오류는 사용자 화면에 띄우지 않고 콘솔에만 기록합니다.
       const message = error instanceof DOMException && error.name === "AbortError"
@@ -154,7 +127,7 @@ export default function GuildManager() {
     // 현재 화면은 그대로 두고, 데이터만 교체합니다.
     setData({
       members: (membersResult.data || []) as Member[],
-      records: sortBossRecords((recordsResult.data || []) as BossRecord[]),
+      records: uniqueBossRecords((recordsResult.data || []) as BossRecord[]),
       distributions: (distributionsResult.data || []) as DistributionRecord[],
       memos: (memosResult.data || []) as AdminMemo[],
       attendance: (attendanceResult.data || []) as Attendance[],
@@ -170,8 +143,8 @@ export default function GuildManager() {
     if (syncSheet) {
       try {
         const [memberResponse, attendanceResponse] = await Promise.all([
-          fetch(`/api/google-sheet/sync?_ts=${Date.now()}`, { cache: "no-store" }),
-          fetch(`/api/google-sheet/attendance-sync?_ts=${Date.now()}`, { cache: "no-store" }),
+          fetch("/api/google-sheet/sync", { cache: "no-store" }),
+          fetch("/api/google-sheet/attendance-sync", { cache: "no-store" }),
         ]);
         const memberResult = await memberResponse.json().catch(() => null);
         const attendanceResult = await attendanceResponse.json().catch(() => null);
@@ -198,7 +171,7 @@ export default function GuildManager() {
     }
     setData({
       members: (members || []) as Member[],
-      records: sortBossRecords((records || []) as BossRecord[]),
+      records: uniqueBossRecords((records || []) as BossRecord[]),
       distributions: (distributions || []) as DistributionRecord[],
       memos: (memos || []) as AdminMemo[],
       attendance: (attendance || []) as Attendance[],
@@ -207,21 +180,20 @@ export default function GuildManager() {
   };
 
   useEffect(() => {
-    // 최초 데이터 로딩 후, Google Sheets의 보스/출석 기록을 5초마다,
-    // 길드원 명단은 30초마다 화면 깜빡임 없이 백그라운드 동기화합니다.
+    // 최초 데이터 로딩 후, Google Sheets의 길드원 명단과 출석 기록을
+    // 30초마다 화면 깜빡임 없이 백그라운드에서 조용히 동기화합니다.
     let stopped = false;
     let timer: number | undefined;
 
-    // 한 번의 동기화가 끝난 뒤 3초를 기다립니다.
-    // Google Sheets는 push 이벤트를 제공하지 않으므로 짧은 폴링으로
-    // 시트 변경을 거의 실시간으로 반영하고, 동기화가 겹치지 않도록 합니다.
+    // 한 번의 동기화가 끝난 뒤 30초를 기다립니다.
+    // setInterval로 고정 주기를 돌리지 않아 동기화 요청이 겹치지 않습니다.
     const runBackgroundSync = async () => {
       if (stopped) return;
       const synced = await syncSheetsSilently();
       if (stopped) return;
       // 시트가 성공했든 실패했든 화면 데이터는 조용히 확인합니다.
       if (synced) await refreshDataSilently();
-      if (!stopped) timer = window.setTimeout(() => { void runBackgroundSync(); }, 3000);
+      if (!stopped) timer = window.setTimeout(() => { void runBackgroundSync(); }, 30000);
     };
 
     // 첫 화면은 Supabase 데이터만 즉시 읽어 띄우고, 시트 동기화는 화면 뒤에서 시작합니다.
@@ -230,17 +202,6 @@ export default function GuildManager() {
       if (!stopped) setLoading(false);
       void runBackgroundSync();
     })();
-
-    const onVisibilityOrFocus = () => {
-      if (document.visibilityState === "visible") {
-        void (async () => {
-          const synced = await syncSheetsSilently();
-          if (synced) await refreshDataSilently();
-        })();
-      }
-    };
-    document.addEventListener("visibilitychange", onVisibilityOrFocus);
-    window.addEventListener("focus", onVisibilityOrFocus);
 
     const channel = supabase.channel("guild-live")
       .on("postgres_changes", { event: "*", schema: "public", table: "members" }, () => { void refreshDataSilently(); })
@@ -252,8 +213,6 @@ export default function GuildManager() {
     return () => {
       stopped = true;
       if (timer !== undefined) window.clearTimeout(timer);
-      document.removeEventListener("visibilitychange", onVisibilityOrFocus);
-      window.removeEventListener("focus", onVisibilityOrFocus);
       void supabase.removeChannel(channel);
     };
   }, []);
@@ -463,7 +422,7 @@ function BossRecords({ data, setData }: { data: AppData; setData: React.Dispatch
   const toggle = (name: string) => setSelected(s => s.includes(name) ? s.filter(x => x !== name) : [...s, name]);
   return <div className="stack"><PageIntro title="⚔️ 보스 참여 기록" desc="보스별 참여자를 저장하고 수정할 수 있습니다." />
     <div className="panel"><div className="panel-title"><span>➕ 참여 기록 추가</span><button className="danger-outline small" onClick={resetAll}><Lock size={13} /> 전체 초기화</button></div><div className="form-grid boss-form"><input type="date" value={date} onChange={e => setDate(e.target.value)} /><input placeholder="보스 이름" value={boss} onChange={e => setBoss(e.target.value)} /><input type="number" placeholder="보스 점수" value={score} onChange={e => setScore(e.target.value)} /></div><div className="member-picker">{data.members.map(m => <button key={m.id} className={selected.includes(m.name) ? "selected" : ""} onClick={() => toggle(m.name)}>{m.name}</button>)}</div><button className="primary" disabled={saving} onClick={add}><Plus size={16} /> {saving ? "저장 중..." : `참여 기록 저장 (${selected.length}명)`}</button></div>
-    <div className="panel table-panel"><div className="table-wrap"><table className="boss-table"><thead><tr><th>날짜</th><th>젠 시간</th><th>보스</th><th>점수</th><th>참여자</th><th>관리</th></tr></thead><tbody>{data.records.map(r => <tr key={r.id}><td>{r.date}</td><td>{r.spawn_time || "-"}</td><td className="strong">{r.boss}</td><td>{formatNumber(r.score)}</td><td>{r.participants?.length ? r.participants.join(", ") : "-"}</td><td><div className="actions"><button title="수정" onClick={() => startEdit(r)}><Pencil size={14} /></button><button title="삭제" className="danger" onClick={() => del(r.id)}><Trash2 size={14} /></button></div></td></tr>)}</tbody></table></div>{!data.records.length && <Empty text="등록된 기록이 없습니다." />}</div>
+    <div className="panel table-panel"><div className="table-wrap"><table className="boss-table"><thead><tr><th>날짜</th><th>보스</th><th>점수</th><th>참여자</th><th>관리</th></tr></thead><tbody>{data.records.map(r => <tr key={r.id}><td>{r.date}</td><td className="strong">{r.boss}</td><td>{formatNumber(r.score)}</td><td>{r.participants?.length ? r.participants.join(", ") : "-"}</td><td><div className="actions"><button title="수정" onClick={() => startEdit(r)}><Pencil size={14} /></button><button title="삭제" className="danger" onClick={() => del(r.id)}><Trash2 size={14} /></button></div></td></tr>)}</tbody></table></div>{!data.records.length && <Empty text="등록된 기록이 없습니다." />}</div>
     {editing && <div className="modal-backdrop" onMouseDown={e => { if (e.target === e.currentTarget) resetEdit(); }}><div className="member-edit-modal boss-edit-modal"><div className="modal-head"><div><div className="eyebrow">ECLIPSE BOSS RECORD</div><h3>✏️ 보스 참여 기록 수정</h3></div><button className="icon-btn" onClick={resetEdit}><X size={20} /></button></div><div className="edit-grid"><label>날짜<input type="date" value={date} onChange={e => setDate(e.target.value)} /></label><label>보스 이름<input value={boss} onChange={e => setBoss(e.target.value)} /></label><label>보스 점수<input type="number" value={score} onChange={e => setScore(e.target.value)} /></label></div><div className="boss-edit-participants"><span>참여자</span><div className="member-picker">{data.members.map(m => <button key={m.id} className={selected.includes(m.name) ? "selected" : ""} onClick={() => toggle(m.name)}>{m.name}</button>)}</div></div><div className="modal-actions"><button className="secondary" onClick={resetEdit}>취소</button><button className="primary" disabled={saving} onClick={saveEdit}>{saving ? "저장 중..." : "수정 저장"}</button></div></div></div>}
   </div>;
 }
@@ -476,7 +435,7 @@ function Distribution({ data, setData }: { data: AppData; setData: React.Dispatc
   const [bonusByName, setBonusByName] = useState<Record<string, number>>({});
   const settlementMemo = "ECLIPSE_AUTO_SETTLEMENT";
 
-  const totalBossRecords = data.records.length;
+  const totalBossRecords = uniqueBossRecords(data.records).length;
   const targetAmount = Math.floor((Number(totalPool) || 0) * Math.min(100, Math.max(0, Number(ratio) || 0)) / 100);
 
   const members = useMemo(() => data.members.map(member => {
@@ -639,11 +598,12 @@ function Distribution({ data, setData }: { data: AppData; setData: React.Dispatc
 }
 
 function Stats({ data }: { data: AppData }) {
-  const total = data.records.length;
-  const rows = data.members.map(m => ({ name: m.name, count: data.records.filter(r => r.participants.includes(m.name)).length, attendance: data.attendance.filter(a => a.member_name === m.name && a.status === "present").length })).sort((a, b) => b.count - a.count);
+  const bossRecords = uniqueBossRecords(data.records);
+  const total = bossRecords.length;
+  const rows = data.members.map(m => ({ name: m.name, count: bossRecords.filter(r => r.participants.includes(m.name)).length, attendance: data.attendance.filter(a => a.member_name === m.name && a.status === "present").length })).sort((a, b) => b.count - a.count);
   const today = new Date().toISOString().slice(0, 10);
   const todayAttendance = data.attendance.filter(a => a.attendance_date === today && a.status === "present");
-  return <div className="stack"><PageIntro title="📅 참여율 기록" desc="보스 참여율과 Discord 출석 현황을 확인합니다." /><div className="cards cards-3"><StatCard icon={<CalendarDays />} label="전체 보스 기록" value={`${total}건`} /><StatCard icon={<Users />} label="전체 보스 참여" value={`${data.records.reduce((a, r) => a + r.participants.length, 0)}회`} /><StatCard icon={<CalendarDays />} label="오늘 Discord 출석" value={`${todayAttendance.length}명`} accent="pink" /></div><div className="panel"><div className="panel-title"><span>길드원별 참여 현황</span></div><div className="table-wrap"><table className="stats-table"><thead><tr><th>길드원</th><th>보스 참여</th><th>참여율</th><th>Discord 출석</th></tr></thead><tbody>{rows.map(r => <tr key={r.name}><td className="strong">{r.name}</td><td>{r.count}회</td><td><div className="mini-rate"><span>{total ? Math.round(r.count / total * 100) : 0}%</span><i style={{ width: `${total ? Math.min(100, r.count / total * 100) : 0}%` }} /></div></td><td>{r.attendance}회</td></tr>)}</tbody></table></div>{!rows.length && <Empty text="길드원을 등록하면 참여율이 표시됩니다." />}</div><div className="panel"><div className="panel-title"><span>🤖 최근 Discord 출석</span><span className="muted">최근 30건</span></div>{data.attendance.length ? <div className="table-wrap"><table className="stats-table"><thead><tr><th>날짜</th><th>출석 시간</th><th>길드원</th><th>Discord</th><th>상태</th></tr></thead><tbody>{data.attendance.slice(0,30).map(a => <tr key={a.id}><td>{a.attendance_date}</td><td className="strong">{a.attendance_time || "-"}</td><td>{a.member_name}</td><td>{a.discord_display_name || "-"}</td><td><span className="status-chip paid">출석</span></td></tr>)}</tbody></table></div> : <Empty text="Discord에서 출석한 기록이 없습니다." />}</div></div>;
+  return <div className="stack"><PageIntro title="📅 참여율 기록" desc="보스 참여율과 Discord 출석 현황을 확인합니다." /><div className="cards cards-3"><StatCard icon={<CalendarDays />} label="전체 보스 기록" value={`${total}건`} /><StatCard icon={<Users />} label="전체 보스 참여" value={`${bossRecords.reduce((a, r) => a + r.participants.length, 0)}회`} /><StatCard icon={<CalendarDays />} label="오늘 Discord 출석" value={`${todayAttendance.length}명`} accent="pink" /></div><div className="panel"><div className="panel-title"><span>길드원별 참여 현황</span></div><div className="table-wrap"><table className="stats-table"><thead><tr><th>길드원</th><th>보스 참여</th><th>참여율</th><th>Discord 출석</th></tr></thead><tbody>{rows.map(r => <tr key={r.name}><td className="strong">{r.name}</td><td>{r.count}회</td><td><div className="mini-rate"><span>{total ? Math.round(r.count / total * 100) : 0}%</span><i style={{ width: `${total ? Math.min(100, r.count / total * 100) : 0}%` }} /></div></td><td>{r.attendance}회</td></tr>)}</tbody></table></div>{!rows.length && <Empty text="길드원을 등록하면 참여율이 표시됩니다." />}</div><div className="panel"><div className="panel-title"><span>🤖 최근 Discord 출석</span><span className="muted">최근 30건</span></div>{data.attendance.length ? <div className="table-wrap"><table className="stats-table"><thead><tr><th>날짜</th><th>길드원</th><th>Discord</th><th>상태</th></tr></thead><tbody>{data.attendance.slice(0,30).map(a => <tr key={a.id}><td>{a.attendance_date}</td><td className="strong">{a.member_name}</td><td>{a.discord_display_name || "-"}</td><td><span className="status-chip paid">출석</span></td></tr>)}</tbody></table></div> : <Empty text="Discord에서 출석한 기록이 없습니다." />}</div></div>;
 }
 
 function MemoManager({ data, setData }: { data: AppData; setData: React.Dispatch<React.SetStateAction<AppData>> }) {
@@ -777,7 +737,7 @@ function Ladder({ members }: { members: Member[] }) {
   const addResult = () => { if (results.length >= 10) return; setResults([...results, `결과 ${results.length + 1}`]); };
   return <div className="stack"><PageIntro title="🎲 사다리 게임" desc="2~10명의 길드원을 선택하고 결과를 랜덤 배정합니다. 누구나 사용할 수 있습니다." />
     <div className="ladder-top"><div className="ladder-count"><strong>{players.length}</strong><span>/ 10명 선택</span></div><button className="secondary" onClick={() => { setPlayers([]); setOut(null); }}>전체 초기화</button></div>
-    <div className="grid-2"><div className="panel"><div className="panel-title"><span>👥 참가자 선택</span><span className="muted">최대 10명</span></div><div className="member-picker ladder-picker">{members.map(m => <button key={m.id} className={players.includes(m.name) ? "selected" : ""} onClick={() => { setOut(null); setPlayers(s => s.includes(m.name) ? s.filter(x => x !== m.name) : s.length >= 10 ? s : [...s, m.name]); }}>{players.includes(m.name) ? "✓ " : ""}{m.name}</button>)}</div></div>
+    <div className="grid-2 ladder-layout"><div className="panel"><div className="panel-title"><span>👥 참가자 선택</span><span className="muted">최대 10명</span></div><div className="member-picker ladder-picker">{members.map(m => <button key={m.id} className={players.includes(m.name) ? "selected" : ""} onClick={() => { setOut(null); setPlayers(s => s.includes(m.name) ? s.filter(x => x !== m.name) : s.length >= 10 ? s : [...s, m.name]); }}>{players.includes(m.name) ? "✓ " : ""}{m.name}</button>)}</div></div>
       <div className="panel"><div className="panel-title"><span>🎯 결과 항목</span><button className="small" onClick={addResult}><Plus size={14} /> 추가</button></div><div className="result-list">{results.map((r, i) => <div className="result-input" key={i}><span>{i + 1}</span><input value={r} onChange={e => setResults(results.map((x, j) => j === i ? e.target.value : x))} />{results.length > 2 && <button onClick={() => setResults(results.filter((_, j) => j !== i))}><X size={14} /></button>}</div>)}</div><button className="primary full ladder-run" disabled={running} onClick={shuffle}>{running ? "🎲 사다리 추첨 중..." : "🎲 사다리 돌리기"}</button></div></div>
     {out && <div className="panel ladder-result"><div className="panel-title"><span>🎉 사다리 결과</span><span className="muted">랜덤 배정 완료</span></div><div className="result-grid">{Object.entries(out).map(([p, r]) => <div className="result-card" key={p}><div className="result-avatar">🐰</div><strong>{p}</strong><span>{r}</span></div>)}</div></div>}
   </div>;
