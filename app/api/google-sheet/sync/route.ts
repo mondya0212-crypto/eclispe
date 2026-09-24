@@ -5,7 +5,7 @@ export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
 const SHEET_ID = process.env.GOOGLE_SHEET_ID || "10TUvN2-5otNh22h8ABDT3bzek6anbUxeJhjodvBfQzE";
-const SHEET_GID = process.env.GOOGLE_SHEET_GID || "314429358";
+const SHEET_GID = process.env.GOOGLE_SHEET_GID || "1397643408";
 const CSV_URL = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/export?format=csv&gid=${SHEET_GID}`;
 
 function parseCsv(text: string): string[][] {

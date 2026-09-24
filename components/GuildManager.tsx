@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   CalendarDays, ChevronDown, Dices, LayoutDashboard, Lock, Menu, Pencil, Plus,
   RefreshCw, Search, Swords, Trash2, Trophy, Users, Wallet, X, FileSpreadsheet,
@@ -49,27 +49,81 @@ export default function GuildManager() {
   const [data, setData] = useState<AppData>({ members: [], records: [], distributions: [], memos: [], attendance: [] });
   const [loading, setLoading] = useState(true);
 
-  const syncAttendanceSilently = async () => {
+  // 자동 동기화가 겹치지 않도록 잠금합니다.
+  const syncInProgressRef = useRef(false);
+  const refreshInProgressRef = useRef(false);
+
+  const fetchWithTimeout = async (url: string, timeoutMs = 55000) => {
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const response = await fetch("/api/google-sheet/attendance-sync", { cache: "no-store" });
-      const result = await response.json().catch(() => null);
-      if (!response.ok || !result?.ok) {
-        console.warn("Google Sheets 출석 기록 자동 동기화 실패:", result?.error || response.status);
-        return false;
-      }
-      return true;
-    } catch (error) {
-      console.warn("Google Sheets 출석 기록 자동 동기화 실패:", error);
-      return false;
+      return await fetch(url, { cache: "no-store", signal: controller.signal });
+    } finally {
+      window.clearTimeout(timer);
     }
   };
 
-  const refreshAttendance = async () => {
-    const { data: attendance } = await supabase
-      .from("attendance")
-      .select("*")
-      .order("attendance_date", { ascending: false });
-    if (attendance) setData(d => ({ ...d, attendance: attendance as Attendance[] }));
+  const syncSheetsSilently = async () => {
+    // 이전 자동 동기화가 아직 진행 중이면 새 요청을 만들지 않습니다.
+    if (syncInProgressRef.current) return false;
+    syncInProgressRef.current = true;
+
+    try {
+      // 두 API를 동시에 호출하지 않고 순차 처리합니다.
+      // 길드원 동기화가 끝난 뒤 출석 기록을 동기화합니다.
+      const memberResponse = await fetchWithTimeout("/api/google-sheet/sync");
+      const memberResult = await memberResponse.json().catch(() => null);
+
+      if (!memberResponse.ok || !memberResult?.ok) {
+        console.warn("Google Sheets 길드원 명단 자동 동기화 실패:", memberResult?.error || memberResponse.status);
+        return false;
+      }
+
+      const attendanceResponse = await fetchWithTimeout("/api/google-sheet/attendance-sync");
+      const attendanceResult = await attendanceResponse.json().catch(() => null);
+
+      if (!attendanceResponse.ok || !attendanceResult?.ok) {
+        console.warn("Google Sheets 출석 기록 자동 동기화 실패:", attendanceResult?.error || attendanceResponse.status);
+        return false;
+      }
+
+      return true;
+    } catch (error) {
+      // 자동 동기화 오류는 사용자 화면에 띄우지 않고 콘솔에만 기록합니다.
+      const message = error instanceof DOMException && error.name === "AbortError"
+        ? "동기화 요청 시간 초과"
+        : error instanceof Error ? error.message : "네트워크 오류";
+      console.warn("Google Sheets 자동 동기화 실패:", message);
+      return false;
+    } finally {
+      syncInProgressRef.current = false;
+    }
+  };
+
+  const refreshDataSilently = async () => {
+    if (refreshInProgressRef.current) return;
+    refreshInProgressRef.current = true;
+    try {
+    const [membersResult, recordsResult, distributionsResult, memosResult, attendanceResult] = await Promise.all([
+      supabase.from("members").select("*").order("name"),
+      supabase.from("boss_records").select("*").order("date", { ascending: false }),
+      supabase.from("distribution_records").select("*").order("date", { ascending: false }),
+      supabase.from("admin_memos").select("*").order("created_at", { ascending: false }),
+      supabase.from("attendance").select("*").order("attendance_date", { ascending: false }),
+    ]);
+
+    // 백그라운드 갱신에서는 loading=true를 절대 건드리지 않습니다.
+    // 현재 화면은 그대로 두고, 데이터만 교체합니다.
+    setData({
+      members: (membersResult.data || []) as Member[],
+      records: (recordsResult.data || []) as BossRecord[],
+      distributions: (distributionsResult.data || []) as DistributionRecord[],
+      memos: (memosResult.data || []) as AdminMemo[],
+      attendance: (attendanceResult.data || []) as Attendance[],
+    });
+    } finally {
+      refreshInProgressRef.current = false;
+    }
   };
 
   const load = async (syncSheet = false) => {
@@ -115,22 +169,35 @@ export default function GuildManager() {
   };
 
   useEffect(() => {
-    // 최초 진입 시 출석 기록은 조용히 한 번 동기화하고, 이후에도 30초마다
-    // Google Sheets의 출석/보스 기록만 백그라운드에서 확인합니다.
-    void syncAttendanceSilently().then(() => load(false));
-    const attendanceTimer = window.setInterval(async () => {
-      const synced = await syncAttendanceSilently();
-      if (synced) await refreshAttendance();
-    }, 30000);
+    // 최초 데이터 로딩 후, Google Sheets의 길드원 명단과 출석 기록을
+    // 30초마다 화면 깜빡임 없이 백그라운드에서 조용히 동기화합니다.
+    let stopped = false;
+    let timer: number | undefined;
+
+    // 한 번의 동기화가 끝난 뒤 30초를 기다립니다.
+    // setInterval로 고정 주기를 돌리지 않아 동기화 요청이 겹치지 않습니다.
+    const runBackgroundSync = async () => {
+      if (stopped) return;
+      const synced = await syncSheetsSilently();
+      if (stopped) return;
+      // 시트가 성공했든 실패했든 화면 데이터는 조용히 확인합니다.
+      if (synced) await refreshDataSilently();
+      if (!stopped) timer = window.setTimeout(() => { void runBackgroundSync(); }, 30000);
+    };
+
+    // 첫 진입도 화면을 띄운 뒤 조용히 최신 시트 데이터를 반영합니다.
+    void runBackgroundSync();
+
     const channel = supabase.channel("guild-live")
-      .on("postgres_changes", { event: "*", schema: "public", table: "members" }, () => { void load(false); })
-      .on("postgres_changes", { event: "*", schema: "public", table: "boss_records" }, () => { void load(false); })
-      .on("postgres_changes", { event: "*", schema: "public", table: "distribution_records" }, () => { void load(false); })
-      .on("postgres_changes", { event: "*", schema: "public", table: "admin_memos" }, () => { void load(false); })
-      .on("postgres_changes", { event: "*", schema: "public", table: "attendance" }, () => { void load(false); })
+      .on("postgres_changes", { event: "*", schema: "public", table: "members" }, () => { void refreshDataSilently(); })
+      .on("postgres_changes", { event: "*", schema: "public", table: "boss_records" }, () => { void refreshDataSilently(); })
+      .on("postgres_changes", { event: "*", schema: "public", table: "distribution_records" }, () => { void refreshDataSilently(); })
+      .on("postgres_changes", { event: "*", schema: "public", table: "admin_memos" }, () => { void refreshDataSilently(); })
+      .on("postgres_changes", { event: "*", schema: "public", table: "attendance" }, () => { void refreshDataSilently(); })
       .subscribe();
     return () => {
-      window.clearInterval(attendanceTimer);
+      stopped = true;
+      if (timer !== undefined) window.clearTimeout(timer);
       void supabase.removeChannel(channel);
     };
   }, []);
