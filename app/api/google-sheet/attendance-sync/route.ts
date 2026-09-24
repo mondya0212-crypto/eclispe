@@ -53,12 +53,17 @@ function parseDateTime(value: string): { date: string; time: string } | null {
   let v = value.trim();
   if (!v) return null;
 
-  // Google Sheets may export dates differently depending on the sheet locale.
-  // Support both ISO-like values and Korean locale values such as
-  // "2026. 9. 24 오후 9:10:00" / "2026-09-24 21:10:00".
-  v = v.replace(/\./g, "-").replace(/\s+/g, " ").trim();
+  // Google Sheets can export the same date/time in several locale-dependent
+  // forms. Normalize separators and support ISO, Korean, slash-separated,
+  // and US-style month/day/year values.
+  v = v.replace(/[.\/]/g, "-").replace(/년|월/g, "-").replace(/일/g, " ").replace(/\s+/g, " ").trim();
 
-  const m = v.match(/(\d{4})-(\d{1,2})-(\d{1,2})\s*(오전|오후|AM|PM)?\s*(\d{1,2})(?::(\d{2}))?(?::(\d{2}))?/i);
+  let m = v.match(/(\d{4})-(\d{1,2})-(\d{1,2})\s*(오전|오후|AM|PM)?\s*(\d{1,2})(?::(\d{2}))?(?::(\d{2}))?/i);
+  if (!m) {
+    // e.g. 09-24-2026 11:05:48 PM
+    const us = v.match(/(\d{1,2})-(\d{1,2})-(\d{4})\s*(오전|오후|AM|PM)?\s*(\d{1,2})(?::(\d{2}))?(?::(\d{2}))?/i);
+    if (us) m = [us[0], us[3], us[1], us[2], us[4], us[5], us[6], us[7]] as RegExpMatchArray;
+  }
   if (!m) return null;
 
   const [, y, mo, d, periodRaw, hhRaw, mmRaw = "00", ssRaw = "00"] = m;
@@ -66,7 +71,7 @@ function parseDateTime(value: string): { date: string; time: string } | null {
   const period = String(periodRaw || "").toLowerCase();
   if ((period === "오후" || period === "pm") && hh < 12) hh += 12;
   if ((period === "오전" || period === "am") && hh === 12) hh = 0;
-  if (hh > 23 || Number(mmRaw) > 59 || Number(ssRaw) > 59) return null;
+  if (hh > 23 || Number(mmRaw) > 59 || Number(ssRaw) > 59 || Number(mo) < 1 || Number(mo) > 12 || Number(d) < 1 || Number(d) > 31) return null;
 
   return {
     date: `${y}-${mo.padStart(2, "0")}-${d.padStart(2, "0")}`,
@@ -77,7 +82,8 @@ function parseDateTime(value: string): { date: string; time: string } | null {
 function parseTimeOnly(value: string): string | null {
   const v = value.trim();
   if (!v) return null;
-  const m = v.match(/^(오전|오후|AM|PM)?\s*(\d{1,2})(?::(\d{2}))(?::(\d{2}))?$/i);
+  // Accept 23:05, 23:05:48, 11:05 PM and Korean 오전/오후 forms.
+  const m = v.match(/^(오전|오후|AM|PM)?\s*(\d{1,2})(?::(\d{2}))(?::(\d{2}))?\s*$/i);
   if (!m) return null;
   const [, periodRaw, hhRaw, mmRaw, ssRaw = "00"] = m;
   let hh = Number(hhRaw);

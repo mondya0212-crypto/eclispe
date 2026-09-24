@@ -43,6 +43,33 @@ function requireAdmin(): boolean {
 function formatNumber(value: number) { return Number(value || 0).toLocaleString("ko-KR"); }
 function totalPower(m: Member) { return Number(m.power) || 0; }
 
+// 보스 기록은 날짜뿐 아니라 실제 젠 시간까지 기준으로 정렬합니다.
+// 시트에서 들어온 시간이 HH:mm:ss / HH:mm / 오전·오후 형식이어도 비교할 수 있게 합니다.
+function bossSortTimestamp(r: BossRecord) {
+  const date = String(r.date || "").trim();
+  const raw = String(r.spawn_time || "").trim();
+  if (!date && !raw) return 0;
+  let time = raw;
+  const ampm = raw.match(/^(오전|오후)\s*(\d{1,2})(?::(\d{2}))?(?::(\d{2}))?$/);
+  if (ampm) {
+    let h = Number(ampm[2]);
+    const m = Number(ampm[3] || 0);
+    const sec = Number(ampm[4] || 0);
+    if (ampm[1] === "오후" && h < 12) h += 12;
+    if (ampm[1] === "오전" && h === 12) h = 0;
+    time = `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`;
+  }
+  const normalizedDate = date.replace(/[.\/]/g, "-").replace(/\s+/g, "").slice(0, 10);
+  const match = time.match(/(\d{1,2}):(\d{2})(?::(\d{2}))?/);
+  const seconds = match ? Number(match[1]) * 3600 + Number(match[2]) * 60 + Number(match[3] || 0) : -1;
+  const dateNum = normalizedDate ? Date.parse(normalizedDate) : 0;
+  return (Number.isNaN(dateNum) ? 0 : dateNum) + Math.max(seconds, 0) * 1000;
+}
+
+function sortBossRecords(records: BossRecord[]) {
+  return [...records].sort((a, b) => bossSortTimestamp(b) - bossSortTimestamp(a));
+}
+
 export default function GuildManager() {
   const [active, setActive] = useState<MenuKey>("dashboard");
   const [sidebar, setSidebar] = useState(true);
@@ -127,7 +154,7 @@ export default function GuildManager() {
     // 현재 화면은 그대로 두고, 데이터만 교체합니다.
     setData({
       members: (membersResult.data || []) as Member[],
-      records: (recordsResult.data || []) as BossRecord[],
+      records: sortBossRecords((recordsResult.data || []) as BossRecord[]),
       distributions: (distributionsResult.data || []) as DistributionRecord[],
       memos: (memosResult.data || []) as AdminMemo[],
       attendance: (attendanceResult.data || []) as Attendance[],
@@ -171,7 +198,7 @@ export default function GuildManager() {
     }
     setData({
       members: (members || []) as Member[],
-      records: (records || []) as BossRecord[],
+      records: sortBossRecords((records || []) as BossRecord[]),
       distributions: (distributions || []) as DistributionRecord[],
       memos: (memos || []) as AdminMemo[],
       attendance: (attendance || []) as Attendance[],
