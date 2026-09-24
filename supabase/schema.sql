@@ -16,6 +16,7 @@ create table if not exists public.members (
 alter table public.members add column if not exists memo text default '';
 alter table public.members add column if not exists job text default '';
 alter table public.members add column if not exists power integer not null default 0;
+alter table public.boss_records add column if not exists spawn_time text default '';
 alter table public.attendance add column if not exists attendance_time text default '';
 -- 이름 기준 Google Sheets bulk upsert에 사용하는 고유 제약입니다.
 -- 기존 DB에 중복 이름이 있다면 먼저 중복을 정리한 뒤 실행하세요.
@@ -29,6 +30,7 @@ create table if not exists public.boss_records (
   boss text not null,
   score integer not null default 0,
   participants text[] not null default '{}',
+  spawn_time text default '',
   created_at timestamptz not null default now()
 );
 

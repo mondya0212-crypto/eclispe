@@ -211,6 +211,7 @@ export async function GET() {
         boss,
         score,
         participants,
+        spawn_time: dt.time,
       };
     });
 
