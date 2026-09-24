@@ -45,27 +45,37 @@ function formatNumber(value: number) { return Number(value || 0).toLocaleString(
 // 보스 젠 시간은 날짜와 무관하게 시간만 표시합니다.\n// 시트 동기화 값(YYYY-MM-DD HH:mm[:ss])과 기존 datetime-local 값 모두 처리합니다.
 function formatSpawnTime(value?: string | null) {
   const v = String(value ?? "").trim().replace(/\u00a0/g, " ").replace(/\s+/g, " ");
-  if (!v) return "-";
+  if (!v || v === "-" || v === "—") return "-";
 
-  // 날짜가 포함된 값: YYYY-MM-DD HH:mm:ss / YYYY.MM.DD 오후 9:10:30 등
-  let m = v.match(/(?:T|\s)(?:오전|오후|AM|PM)?\s*(\d{1,2}):\s*(\d{2})(?::\s*(\d{2}))?/i);
+  // YYYY-MM-DD HH:mm[:ss], YYYY. M. D. 오후 9:10:30, YYYY년 M월 D일 오후 9시 10분 30초 등
+  let m = v.match(/(?:^|T|\s)(?:오전|오후|AM|PM)?\s*(\d{1,2})\s*(?::|시)\s*(\d{1,2})(?:\s*분)?(?:\s*[:초]\s*(\d{1,2})\s*초?)?/i);
   if (m) {
     let h = Number(m[1]);
     const period = (v.match(/(?:^|\s)(오전|오후|AM|PM)\s*\d/i)?.[1] || "").toLowerCase();
     if ((period === "오후" || period === "pm") && h < 12) h += 12;
     if ((period === "오전" || period === "am") && h === 12) h = 0;
-    return `${String(h).padStart(2, "0")}:${m[2]}:${m[3] || "00"}`;
+    const mm = Number(m[2]);
+    const ss = Number(m[3] || 0);
+    if (h <= 23 && mm <= 59 && ss <= 59) return `${String(h).padStart(2, "0")}:${String(mm).padStart(2, "0")}:${String(ss).padStart(2, "0")}`;
   }
 
-  // 시간만 있는 값: 21:10:30 / 오후 9:10:30 / 오후 9시 10분 30초
-  m = v.match(/^(오전|오후|AM|PM)?\s*(\d{1,2})\s*:\s*(\d{2})(?:\s*:\s*(\d{2}))?$/i);
-  if (!m) m = v.match(/^(오전|오후|AM|PM)?\s*(\d{1,2})\s*시\s*(\d{1,2})\s*분(?:\s*(\d{1,2})\s*초)?$/i);
+  // 시간만 있는 값: 21:10:30 / 오후 9:10:30 / 오후 9시 10분 30초 / 21시10분30초
+  m = v.match(/^(오전|오후|AM|PM)?\s*(\d{1,2})\s*(?::|시)\s*(\d{1,2})(?:\s*분)?(?:\s*[:초]\s*(\d{1,2})\s*초?)?$/i);
   if (m) {
     let h = Number(m[2]);
     const period = (m[1] || "").toLowerCase();
     if ((period === "오후" || period === "pm") && h < 12) h += 12;
     if ((period === "오전" || period === "am") && h === 12) h = 0;
-    return `${String(h).padStart(2, "0")}:${String(m[3]).padStart(2, "0")}:${String(m[4] || "00").padStart(2, "0")}`;
+    return `${String(h).padStart(2, "0")}:${String(m[3]).padStart(2, "0")}:${String(m[4] || 0).padStart(2, "0")}`;
+  }
+
+  // 숫자형 Google Sheets 날짜/시간 serial이 이미 DB에 들어간 경우에도 표시
+  if (/^\d+(?:\.\d+)?$/.test(v)) {
+    const n = Number(v);
+    if (n >= 0 && n < 1) {
+      const total = Math.round(n * 86400) % 86400;
+      return `${String(Math.floor(total / 3600)).padStart(2, "0")}:${String(Math.floor((total % 3600) / 60)).padStart(2, "0")}:${String(total % 60).padStart(2, "0")}`;
+    }
   }
   return v;
 }

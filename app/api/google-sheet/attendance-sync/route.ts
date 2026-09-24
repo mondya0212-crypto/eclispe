@@ -62,22 +62,47 @@ function normalizeDateParts(y: string, mo: string, d: string, hhRaw: string, mmR
   };
 }
 
+function parseGoogleSerial(value: string, fallbackDate?: string): { date: string; time: string } | null {
+  const v = String(value ?? "").trim();
+  if (!/^\d+(?:\.\d+)?$/.test(v)) return null;
+  const n = Number(v);
+  if (!Number.isFinite(n) || n < 0 || n > 100000) return null;
+
+  // Google Sheets/Excel 계열 날짜 serial: 1899-12-30 기준.
+  // 0~1 사이 값은 '시간만' 저장된 경우로 보고 fallbackDate를 사용합니다.
+  if (n < 1 && fallbackDate) {
+    const totalSeconds = Math.round(n * 86400) % 86400;
+    const hh = Math.floor(totalSeconds / 3600);
+    const mm = Math.floor((totalSeconds % 3600) / 60);
+    const ss = totalSeconds % 60;
+    return { date: fallbackDate, time: `${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}:${String(ss).padStart(2, "0")}` };
+  }
+
+  // 소수부가 없고 너무 작은 숫자면 날짜가 아닌 단순 숫자로 취급.
+  if (n < 1000) return null;
+  const epoch = new Date(Date.UTC(1899, 11, 30));
+  const ms = Math.round(n * 86400000);
+  const d = new Date(epoch.getTime() + ms);
+  if (Number.isNaN(d.getTime())) return null;
+  const date = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}-${String(d.getUTCDate()).padStart(2, "0")}`;
+  const time = `${String(d.getUTCHours()).padStart(2, "0")}:${String(d.getUTCMinutes()).padStart(2, "0")}:${String(d.getUTCSeconds()).padStart(2, "0")}`;
+  return { date, time };
+}
+
 function parseTimeParts(value: string): string | null {
   let v = String(value ?? "").replace(/\u00a0/g, " ").replace(/\s+/g, " ").trim();
   if (!v) return null;
+  v = v.replace(/^(?:시간\s*[:：]\s*)/i, "").trim();
 
   // 지원: 21:10:30 / 21:10 / 오후 9:10:30 / 오후 9시 10분 30초 / 21시10분30초
-  let m = v.match(/^(오전|오후|AM|PM)?\s*(\d{1,2})\s*:\s*(\d{2})(?:\s*:\s*(\d{2}))?$/i);
+  let m = v.match(/^(오전|오후|AM|PM)?\s*(\d{1,2})\s*:\s*(\d{1,2})(?:\s*:\s*(\d{1,2}))?\s*(?:시)?$/i);
   if (!m) m = v.match(/^(오전|오후|AM|PM)?\s*(\d{1,2})\s*시\s*(\d{1,2})\s*분(?:\s*(\d{1,2})\s*초)?$/i);
   if (!m) return null;
 
   const period = m[1] || "";
-  const hh = m[2];
-  const mm = m[3];
-  const ss = m[4] || "00";
-  let hour = Number(hh);
-  const minute = Number(mm);
-  const second = Number(ss);
+  let hour = Number(m[2]);
+  const minute = Number(m[3]);
+  const second = Number(m[4] || "00");
   const p = period.toLowerCase();
   if ((p === "오후" || p === "pm") && hour < 12) hour += 12;
   if ((p === "오전" || p === "am") && hour === 12) hour = 0;
@@ -85,21 +110,30 @@ function parseTimeParts(value: string): string | null {
   return `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}:${String(second).padStart(2, "0")}`;
 }
 
-function parseDateTime(value: string): { date: string; time: string } | null {
+function parseDateTime(value: string, fallbackDate?: string): { date: string; time: string } | null {
   let v = String(value ?? "").replace(/\u00a0/g, " ").replace(/\s+/g, " ").trim();
   if (!v) return null;
 
-  // 날짜+시간: 2026. 9. 24 오후 9:10:30 / 2026-09-24 21:10:30 / 9/24/2026 9:10:30 PM
-  const ymd = v.match(/^(\d{4})\s*[.\-/]\s*(\d{1,2})\s*[.\-/]\s*(\d{1,2})\s*(?:T|\s+)?(오전|오후|AM|PM)?\s*(\d{1,2})(?::|시)\s*(\d{1,2})(?:분)?(?:\s*(?::|초)\s*(\d{1,2})\s*초?)?/i);
-  if (ymd) return normalizeDateParts(ymd[1], ymd[2], ymd[3], ymd[5], ymd[6], ymd[7] || "00", ymd[4] || "");
+  const serial = parseGoogleSerial(v, fallbackDate);
+  if (serial) return serial;
 
-  const mdy = v.match(/^(\d{1,2})\s*[\/\-.]\s*(\d{1,2})\s*[\/\-.]\s*(\d{4})\s*(?:T|\s+)?(오전|오후|AM|PM)?\s*(\d{1,2})(?::|시)\s*(\d{1,2})(?:분)?(?:\s*(?::|초)\s*(\d{1,2})\s*초?)?/i);
-  if (mdy) return normalizeDateParts(mdy[3], mdy[1], mdy[2], mdy[5], mdy[6], mdy[7] || "00", mdy[4] || "");
+  // YYYY-MM-DD / YYYY.MM.DD / YYYY년 M월 D일 + 시간
+  let m = v.match(/^(\d{4})\s*[.\-/년]\s*(\d{1,2})\s*[.\-/월]\s*(\d{1,2})\s*(?:일\s*)?(?:T|\s+|[, ]+)?(오전|오후|AM|PM)?\s*(\d{1,2})(?::|시)\s*(\d{1,2})(?:분)?(?:\s*(?::|분|초)\s*(\d{1,2})\s*초?)?/i);
+  if (m) return normalizeDateParts(m[1], m[2], m[3], m[5], m[6], m[7] || "00", m[4] || "");
+
+  // 위 형식에서 날짜 뒤 마침표가 하나 더 붙는 경우: 2026. 9. 24. 오후 9:10:30
+  m = v.match(/^(\d{4})\s*[.\-/]\s*(\d{1,2})\s*[.\-/]\s*(\d{1,2})\s*\.\s*(?:T|\s+)?(오전|오후|AM|PM)?\s*(\d{1,2})(?::|시)\s*(\d{1,2})(?:분)?(?:\s*(?::|분|초)\s*(\d{1,2})\s*초?)?/i);
+  if (m) return normalizeDateParts(m[1], m[2], m[3], m[5], m[6], m[7] || "00", m[4] || "");
+
+  // M/D/YYYY 또는 M-D-YYYY
+  m = v.match(/^(\d{1,2})\s*[\/\-.]\s*(\d{1,2})\s*[\/\-.]\s*(\d{4})\s*(?:T|\s+)?(오전|오후|AM|PM)?\s*(\d{1,2})(?::|시)\s*(\d{1,2})(?:분)?(?:\s*(?::|분|초)\s*(\d{1,2})\s*초?)?/i);
+  if (m) return normalizeDateParts(m[3], m[1], m[2], m[5], m[6], m[7] || "00", m[4] || "");
 
   return null;
 }
-function parseTimeOnly(value: string): string | null {
-  return parseTimeParts(value);
+
+function parseTimeOnly(value: string, fallbackDate?: string): string | null {
+  return parseTimeParts(value) || parseGoogleSerial(value, fallbackDate)?.time || null;
 }
 
 function weekOfMonth(date: string) {
@@ -181,8 +215,8 @@ export async function GET() {
 
       // 젠 시간 열이 날짜+시간인 경우와 시간만 적힌 경우를 모두 지원합니다.
       // 시간만 있는 경우에는 참여 시간의 날짜를 보스 날짜로 사용합니다.
-      const parsedSpawn = parseDateTime(spawnRaw);
-      const spawnTimeOnly = parseTimeOnly(spawnRaw);
+      const parsedSpawn = parseDateTime(spawnRaw, attendedDateParsed);
+      const spawnTimeOnly = parseTimeOnly(spawnRaw, attendedDateParsed);
       const dt = parsedSpawn
         ? parsedSpawn
         : (spawnTimeOnly && attendedDateParsed
