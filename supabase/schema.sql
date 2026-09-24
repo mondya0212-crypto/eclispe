@@ -22,6 +22,7 @@ create table if not exists public.boss_records (
   id uuid primary key default gen_random_uuid(),
   week integer not null default 1 check (week between 1 and 5),
   date date not null default current_date,
+  spawn_time text default null,
   boss text not null,
   score integer not null default 0,
   participants text[] not null default '{}',
@@ -67,6 +68,8 @@ create index if not exists attendance_date_idx on public.attendance(attendance_d
 create index if not exists attendance_member_idx on public.attendance(member_name);
 
 alter table public.members enable row level security;
+alter table public.boss_records add column if not exists spawn_time text default null;
+
 alter table public.boss_records enable row level security;
 alter table public.admin_memos enable row level security;
 alter table public.distribution_records enable row level security;

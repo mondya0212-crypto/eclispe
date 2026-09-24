@@ -184,6 +184,7 @@ export async function GET() {
         boss,
         score,
         participants,
+        spawn_time: `${dt.date} ${dt.time}`,
       };
 
       const { error } = await admin.from("boss_records").upsert(record, { onConflict: "id" });
