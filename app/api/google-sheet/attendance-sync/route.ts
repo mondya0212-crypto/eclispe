@@ -1,0 +1,180 @@
+import { NextResponse } from "next/server";
+import { createHash } from "crypto";
+import { createClient } from "@supabase/supabase-js";
+
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
+
+const SHEET_ID = process.env.GOOGLE_SHEET_ID || "10TUvN2-5otNh22h8ABDT3bzek6anbUxeJhjodvBfQzE";
+// '출석 기록' 탭의 GID (봇이 사용하는 출석 기록 시트)
+const ATTENDANCE_SHEET_GID = process.env.GOOGLE_ATTENDANCE_SHEET_GID || "1397643408";
+const CSV_URL = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/export?format=csv&gid=${ATTENDANCE_SHEET_GID}`;
+
+function parseCsv(text: string): string[][] {
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let cell = "";
+  let quoted = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    const next = text[i + 1];
+    if (ch === '"') {
+      if (quoted && next === '"') { cell += '"'; i++; }
+      else quoted = !quoted;
+    } else if (ch === ',' && !quoted) {
+      row.push(cell); cell = "";
+    } else if ((ch === '\n' || ch === '\r') && !quoted) {
+      if (ch === '\r' && next === '\n') i++;
+      row.push(cell); cell = "";
+      if (row.some(v => v.trim() !== "")) rows.push(row);
+      row = [];
+    } else cell += ch;
+  }
+  if (cell !== "" || row.length) {
+    row.push(cell);
+    if (row.some(v => v.trim() !== "")) rows.push(row);
+  }
+  return rows;
+}
+
+function normalizeHeader(value: string) {
+  return value.replace(/^\uFEFF/, "").trim().replace(/[\s\u00A0_\-\/\\()\[\]{}:：·•]/g, "").toLowerCase();
+}
+
+function findHeader(headers: string[], names: string[], tokens: string[] = []) {
+  const normalized = headers.map(normalizeHeader);
+  const exact = names.map(n => normalized.indexOf(normalizeHeader(n))).find(i => i >= 0);
+  if (exact !== undefined) return exact;
+  return normalized.findIndex(h => tokens.some(t => h.includes(normalizeHeader(t))));
+}
+
+function parseDateTime(value: string): { date: string; time: string } | null {
+  const v = value.trim().replace(/\//g, "-");
+  const m = v.match(/(\d{4})-(\d{1,2})-(\d{1,2})\s+(\d{1,2}):(\d{2})(?::(\d{2}))?/);
+  if (!m) return null;
+  const [, y, mo, d, hh, mm, ss = "00"] = m;
+  return {
+    date: `${y}-${mo.padStart(2, "0")}-${d.padStart(2, "0")}`,
+    time: `${hh.padStart(2, "0")}:${mm}:${ss}`,
+  };
+}
+
+function weekOfMonth(date: string) {
+  const day = Number(date.slice(8, 10));
+  return Math.min(5, Math.max(1, Math.ceil(day / 7)));
+}
+
+function deterministicUuid(key: string) {
+  const hex = createHash("sha1").update(`eclipse-google-attendance:${key}`).digest("hex").slice(0, 32).split("");
+  // UUID v5-like deterministic ID. This avoids adding another DB column just for sheet sync.
+  hex[12] = "5";
+  hex[16] = ((parseInt(hex[16], 16) & 0x3) | 0x8).toString(16);
+  return `${hex.slice(0, 8).join("")}-${hex.slice(8, 12).join("")}-${hex.slice(12, 16).join("")}-${hex.slice(16, 20).join("")}-${hex.slice(20, 32).join("")}`;
+}
+
+export async function GET() {
+  try {
+    const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
+    const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+    if (!url || !key) {
+      return NextResponse.json({ ok: false, error: "SUPABASE_SERVICE_ROLE_KEY 환경변수가 없습니다." }, { status: 500 });
+    }
+
+    const response = await fetch(CSV_URL, { cache: "no-store" });
+    if (!response.ok) {
+      return NextResponse.json({ ok: false, error: `Google Sheets 출석 기록 응답 오류: ${response.status}` }, { status: 502 });
+    }
+    const text = await response.text();
+    if (!text || text.trim().startsWith("<!DOCTYPE") || text.includes("Sign in")) {
+      return NextResponse.json({ ok: false, error: "출석 기록 시트를 공개 CSV로 읽을 수 없습니다. Google Sheets 공유 설정을 확인해주세요." }, { status: 403 });
+    }
+
+    const rows = parseCsv(text);
+    if (rows.length < 2) return NextResponse.json({ ok: true, synced: 0, attendance: 0 });
+
+    const headers = rows[0];
+    const participantsIdx = findHeader(headers, ["참여 닉네임", "참여자", "닉네임"], ["참여닉네임", "참여자"]);
+    const attendedIdx = findHeader(headers, ["참여 시간", "출석 시간"], ["참여시간", "출석시간"]);
+    const bossIdx = findHeader(headers, ["보스명", "보스"], ["보스명"]);
+    const scoreIdx = findHeader(headers, ["참여 점수", "점수"], ["참여점수"]);
+    const spawnIdx = findHeader(headers, ["젠 시간", "젠시간"], ["젠시간"]);
+
+    if (participantsIdx < 0 || bossIdx < 0 || spawnIdx < 0) {
+      return NextResponse.json({
+        ok: false,
+        error: `출석 기록 시트 헤더를 찾지 못했습니다. 현재 헤더: ${headers.join(" / ")}`,
+      }, { status: 400 });
+    }
+
+    const admin = createClient(url, key, { auth: { autoRefreshToken: false, persistSession: false } });
+    let synced = 0;
+    let attendanceSynced = 0;
+    const errors: string[] = [];
+
+    for (let i = 1; i < rows.length; i++) {
+      const r = rows[i];
+      const boss = String(r[bossIdx] ?? "").trim();
+      const spawnRaw = String(r[spawnIdx] ?? "").trim();
+      const participants = String(r[participantsIdx] ?? "").split(",").map(v => v.trim()).filter(Boolean);
+      if (!boss || !spawnRaw || !participants.length) continue;
+
+      const dt = parseDateTime(spawnRaw);
+      if (!dt) {
+        errors.push(`행 ${i + 1}: 젠 시간을 해석할 수 없습니다 (${spawnRaw})`);
+        continue;
+      }
+
+      const scoreRaw = scoreIdx >= 0 ? String(r[scoreIdx] ?? "").replace(/[,_\s]/g, "") : "";
+      const score = Number(scoreRaw) || participants.length;
+      const id = deterministicUuid(`${boss}|${spawnRaw}`);
+      const record = {
+        id,
+        week: weekOfMonth(dt.date),
+        date: dt.date,
+        boss,
+        score,
+        participants,
+      };
+
+      const { error } = await admin.from("boss_records").upsert(record, { onConflict: "id" });
+      if (error) {
+        errors.push(`행 ${i + 1} ${boss}: ${error.message}`);
+        continue;
+      }
+      synced++;
+
+      // 사이트의 'Discord 출석'도 시트에서 함께 채웁니다.
+      const attendedRaw = attendedIdx >= 0 ? String(r[attendedIdx] ?? "").trim() : "";
+      const attendedDate = parseDateTime(attendedRaw)?.date || dt.date;
+      for (const name of participants) {
+        const { error: attendanceError } = await admin.from("attendance").upsert({
+          member_name: name,
+          discord_user_id: "",
+          discord_display_name: name,
+          attendance_date: attendedDate,
+          status: "present",
+          source: "google_sheet",
+        }, { onConflict: "member_name,attendance_date" });
+        if (!attendanceError) attendanceSynced++;
+      }
+    }
+
+    return NextResponse.json({
+      ok: errors.length === 0,
+      synced,
+      attendance: attendanceSynced,
+      rows: rows.length - 1,
+      errors: errors.slice(0, 20),
+      sheet: { id: SHEET_ID, gid: ATTENDANCE_SHEET_GID },
+      columns: {
+        participants: participantsIdx >= 0 ? headers[participantsIdx] : "",
+        attended: attendedIdx >= 0 ? headers[attendedIdx] : "",
+        boss: headers[bossIdx] ?? "",
+        spawn: headers[spawnIdx] ?? "",
+      },
+      fetchedAt: new Date().toISOString(),
+    }, { status: errors.length ? 207 : 200 });
+  } catch (error) {
+    return NextResponse.json({ ok: false, error: error instanceof Error ? error.message : "출석 기록 동기화 실패" }, { status: 500 });
+  }
+}

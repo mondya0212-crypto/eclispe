@@ -32,9 +32,27 @@ function parseCsv(text: string): string[][] {
   return rows;
 }
 
-function headerIndex(headers: string[], names: string[]) {
-  const normalized = headers.map(h => h.trim().replace(/\s+/g, "").toLowerCase());
-  return names.map(n => normalized.indexOf(n.replace(/\s+/g, "").toLowerCase())).find(i => i >= 0) ?? -1;
+function normalizeHeader(value: string) {
+  return value
+    .replace(/^\uFEFF/, "")
+    .trim()
+    .replace(/[\s\u00A0_\-\/\\()\[\]{}:：·•]/g, "")
+    .toLowerCase();
+}
+
+function headerIndex(headers: string[], names: string[], containsTokens: string[] = []) {
+  const normalized = headers.map(normalizeHeader);
+  const exact = names
+    .map(n => normalized.indexOf(normalizeHeader(n)))
+    .find(i => i >= 0);
+  if (exact !== undefined) return exact;
+
+  const tokens = containsTokens.map(normalizeHeader).filter(Boolean);
+  if (tokens.length) {
+    const found = normalized.findIndex(h => tokens.some(t => h.includes(t)));
+    if (found >= 0) return found;
+  }
+  return -1;
 }
 
 export async function GET() {
@@ -49,10 +67,12 @@ export async function GET() {
     const rows = parseCsv(text);
     if (rows.length < 2) return NextResponse.json({ ok: true, synced: 0, members: [] });
     const headers = rows[0];
-    const nameIdx = headerIndex(headers, ["닉네임", "이름", "게임닉네임", "캐릭터명"]);
-    const jobIdx = headerIndex(headers, ["직업", "클래스"]);
-    const powerIdx = headerIndex(headers, ["투력", "전투력", "전투력(투력)"]);
-    const memoIdx = headerIndex(headers, ["메모", "비고"]);
+    const nameIdx = headerIndex(headers, ["닉네임", "이름", "게임닉네임", "캐릭터명", "캐릭터닉네임"], ["닉네임", "캐릭터명"]);
+    const jobIdx = headerIndex(headers, [
+      "직업", "직업명", "클래스", "클래스명", "직업(클래스)", "직업 / 클래스", "Job", "Class"
+    ], ["직업", "클래스", "job", "class"]);
+    const powerIdx = headerIndex(headers, ["투력", "전투력", "전투력(투력)", "전투력/투력"], ["전투력", "투력"]);
+    const memoIdx = headerIndex(headers, ["메모", "비고", "메모사항"], ["메모", "비고"]);
     if (nameIdx < 0 || powerIdx < 0) {
       return NextResponse.json({ ok: false, error: `시트 헤더를 찾지 못했습니다. 현재 헤더: ${headers.join(" / ")}` }, { status: 400 });
     }
@@ -105,7 +125,7 @@ export async function GET() {
       }, { status: 500 });
     }
 
-    return NextResponse.json({ ok: true, synced, rows: members.length, members, sheet: { id: SHEET_ID, gid: SHEET_GID }, fetchedAt: new Date().toISOString() });
+    return NextResponse.json({ ok: true, synced, rows: members.length, members, sheet: { id: SHEET_ID, gid: SHEET_GID }, columns: { name: headers[nameIdx] ?? "", job: jobIdx >= 0 ? headers[jobIdx] : "찾지 못함", power: headers[powerIdx] ?? "", memo: memoIdx >= 0 ? headers[memoIdx] : "없음" }, jobValues: [...new Set(members.map(m => m.job).filter(Boolean))].slice(0, 30), fetchedAt: new Date().toISOString() });
   } catch (error) {
     return NextResponse.json({ ok: false, error: error instanceof Error ? error.message : "Google Sheets 동기화 실패" }, { status: 500 });
   }

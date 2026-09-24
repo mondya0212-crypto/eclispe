@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   CalendarDays, ChevronDown, Dices, LayoutDashboard, Lock, Menu, Pencil, Plus,
-  RefreshCw, Search, Swords, Trash2, Trophy, Users, Wallet, X,
+  RefreshCw, Search, Swords, Trash2, Trophy, Users, Wallet, X, FileSpreadsheet,
 } from "lucide-react";
 import { supabase } from "../lib/supabase";
 
@@ -49,19 +49,38 @@ export default function GuildManager() {
   const [data, setData] = useState<AppData>({ members: [], records: [], distributions: [], memos: [], attendance: [] });
   const [loading, setLoading] = useState(true);
 
+  const syncAttendanceSilently = async () => {
+    try {
+      const response = await fetch("/api/google-sheet/attendance-sync", { cache: "no-store" });
+      const result = await response.json().catch(() => null);
+      if (!response.ok || !result?.ok) {
+        console.warn("Google Sheets 출석 기록 자동 동기화 실패:", result?.error || response.status);
+        return false;
+      }
+      return true;
+    } catch (error) {
+      console.warn("Google Sheets 출석 기록 자동 동기화 실패:", error);
+      return false;
+    }
+  };
+
   const load = async (syncSheet = false) => {
     setLoading(true);
-    // Google Sheets 동기화 결과를 숨기지 않고 사용자에게 알려줍니다.
-    // Realtime 이벤트에서는 동기화를 다시 실행하지 않아 무한 루프를 방지합니다.
+    // 수동 시트 동기화는 길드원 정보 + 출석/보스 기록을 한 번에 반영합니다.
     if (syncSheet) {
       try {
-        const response = await fetch("/api/google-sheet/sync", { cache: "no-store" });
-        let result: { ok?: boolean; error?: string; synced?: number; rows?: number; failed?: number } | null = null;
-        try { result = await response.json(); } catch {}
-        if (!response.ok || !result?.ok) {
-          window.alert(`❌ Google Sheets 연동 실패\n\n${result?.error || `서버 오류 (${response.status})`}`);
+        const [memberResponse, attendanceResponse] = await Promise.all([
+          fetch("/api/google-sheet/sync", { cache: "no-store" }),
+          fetch("/api/google-sheet/attendance-sync", { cache: "no-store" }),
+        ]);
+        const memberResult = await memberResponse.json().catch(() => null);
+        const attendanceResult = await attendanceResponse.json().catch(() => null);
+        if (!memberResponse.ok || !memberResult?.ok) {
+          window.alert(`❌ Google Sheets 길드원 동기화 실패\n\n${memberResult?.error || `서버 오류 (${memberResponse.status})`}`);
+        } else if (!attendanceResponse.ok || !attendanceResult?.ok) {
+          window.alert(`⚠️ 길드원 동기화는 완료됐지만 출석 기록 동기화에 문제가 있습니다.\n\n길드원: ${memberResult.synced ?? 0}명\n출석/보스 오류: ${attendanceResult?.error || `서버 오류 (${attendanceResponse.status})`}`);
         } else {
-          window.alert(`✅ Google Sheets 동기화 완료\n\n시트에서 ${result.rows ?? 0}명 확인\nSupabase에 ${result.synced ?? 0}명 반영`);
+          window.alert(`✅ Google Sheets 전체 동기화 완료\n\n길드원: ${memberResult.synced ?? 0}명\n보스 출석 기록: ${attendanceResult.synced ?? 0}건\n출석 반영: ${attendanceResult.attendance ?? 0}건\n\n직업 열: ${memberResult.columns?.job || "찾지 못함"}`);
         }
       } catch (error) {
         window.alert(`❌ Google Sheets 연동 실패\n\n${error instanceof Error ? error.message : "네트워크 오류"}`);
@@ -88,7 +107,12 @@ export default function GuildManager() {
   };
 
   useEffect(() => {
-    void load(true);
+    // 최초 진입 시 출석 기록은 조용히 한 번 동기화하고, 이후에도 30초마다
+    // Google Sheets의 출석/보스 기록만 백그라운드에서 확인합니다.
+    void syncAttendanceSilently().then(() => load(false));
+    const attendanceTimer = window.setInterval(() => {
+      void syncAttendanceSilently();
+    }, 30000);
     const channel = supabase.channel("guild-live")
       .on("postgres_changes", { event: "*", schema: "public", table: "members" }, () => { void load(false); })
       .on("postgres_changes", { event: "*", schema: "public", table: "boss_records" }, () => { void load(false); })
@@ -96,8 +120,10 @@ export default function GuildManager() {
       .on("postgres_changes", { event: "*", schema: "public", table: "admin_memos" }, () => { void load(false); })
       .on("postgres_changes", { event: "*", schema: "public", table: "attendance" }, () => { void load(false); })
       .subscribe();
-    const timer = window.setInterval(() => { void load(true); }, 60000);
-    return () => { window.clearInterval(timer); void supabase.removeChannel(channel); };
+    return () => {
+      window.clearInterval(attendanceTimer);
+      void supabase.removeChannel(channel);
+    };
   }, []);
 
   const title = menus.find(m => m.key === active)?.label || "대시보드";
@@ -116,7 +142,7 @@ export default function GuildManager() {
       <header className="topbar">
         <button className="icon-btn menu-toggle" onClick={() => setSidebar(!sidebar)}><Menu size={20} /></button>
         <div><div className="crumb">ECLIPSE GUILD / {title}</div><h1>{title}</h1></div>
-        <button className="refresh" onClick={() => void load(true)} title="새로고침"><RefreshCw size={16} /></button>
+        <div style={{display:"flex",gap:8,alignItems:"center"}}><button className="secondary" onClick={() => void load(true)} title="Google Sheets 전체 동기화"><FileSpreadsheet size={15} /> 시트 동기화</button><button className="refresh" onClick={() => void load(false)} title="데이터 새로고침"><RefreshCw size={16} /></button></div>
       </header>
       <section className="content">
         {loading ? <div className="loading-page"><div className="loading-dot" /> 데이터를 불러오는 중...</div> : <>
