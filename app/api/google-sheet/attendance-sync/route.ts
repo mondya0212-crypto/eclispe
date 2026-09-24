@@ -55,10 +55,20 @@ function parseDateTime(value: string): { date: string; time: string } | null {
   // Google Sheets may export dates differently depending on the sheet locale.
   // Support both ISO-like values and Korean locale values such as
   // "2026. 9. 24 오후 9:10:00" / "2026-09-24 21:10:00".
-  v = v.replace(/\./g, "-").replace(/\s+/g, " ").trim();
+  v = v.replace(/[.\/]/g, "-").replace(/T/g, " ").replace(/\s+/g, " ").trim();
 
-  const m = v.match(/(\d{4})-(\d{1,2})-(\d{1,2})\s*(오전|오후|AM|PM)?\s*(\d{1,2})(?::(\d{2}))?(?::(\d{2}))?/i);
-  if (!m) return null;
+  // Sheets CSV can return values like:
+  // 2026. 9. 24 오후 9:10:00
+  // 2026-09-24 21:10:00
+  // 2026-09-24T21:10:00+09:00
+  // 2026-09-24 21:10
+  const m = v.match(/(\d{4})-(\d{1,2})-(\d{1,2})(?:\s+|$)(오전|오후|AM|PM)?\s*(\d{1,2})(?::(\d{2}))?(?::(\d{2}))?/i);
+  if (!m) {
+    // Fallback for ISO strings containing a timezone offset.
+    const iso = v.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?/);
+    if (!iso) return null;
+    return { date: `${iso[1]}-${iso[2]}-${iso[3]}`, time: `${iso[4]}:${iso[5]}:${iso[6] || "00"}` };
+  }
 
   const [, y, mo, d, periodRaw, hhRaw, mmRaw = "00", ssRaw = "00"] = m;
   let hh = Number(hhRaw);
