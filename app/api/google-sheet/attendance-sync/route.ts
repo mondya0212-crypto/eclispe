@@ -129,6 +129,25 @@ function parseDateTime(value: string, fallbackDate?: string): { date: string; ti
   m = v.match(/^(\d{1,2})\s*[\/\-.]\s*(\d{1,2})\s*[\/\-.]\s*(\d{4})\s*(?:T|\s+)?(오전|오후|AM|PM)?\s*(\d{1,2})(?::|시)\s*(\d{1,2})(?:분)?(?:\s*(?::|분|초)\s*(\d{1,2})\s*초?)?/i);
   if (m) return normalizeDateParts(m[3], m[1], m[2], m[5], m[6], m[7] || "00", m[4] || "");
 
+  // Google Sheets가 내보내는 값에 요일/쉼표/문자 등이 섞여도
+  // 날짜와 시간 부분을 찾아냅니다.
+  const dateMatch = v.match(/(\d{4})\s*(?:[-\/.년]\s*)(\d{1,2})\s*(?:[-\/.월]\s*)(\d{1,2})/);
+  if (dateMatch) {
+    const timeMatch = v.match(/(오전|오후|AM|PM)?\s*(\d{1,2})\s*(?::|시)\s*(\d{1,2})(?:\s*분)?(?:\s*(?::|초)\s*(\d{1,2})\s*초?)?/i);
+    if (timeMatch) {
+      return normalizeDateParts(dateMatch[1], dateMatch[2], dateMatch[3], timeMatch[2], timeMatch[3], timeMatch[4] || "00", timeMatch[1] || "");
+    }
+  }
+
+  // 마지막 안전망: JS Date가 해석할 수 있는 일반적인 날짜 문자열
+  const jsDate = new Date(v);
+  if (!Number.isNaN(jsDate.getTime()) && /\d{4}/.test(v)) {
+    return {
+      date: `${jsDate.getFullYear()}-${String(jsDate.getMonth() + 1).padStart(2, "0")}-${String(jsDate.getDate()).padStart(2, "0")}`,
+      time: `${String(jsDate.getHours()).padStart(2, "0")}:${String(jsDate.getMinutes()).padStart(2, "0")}:${String(jsDate.getSeconds()).padStart(2, "0")}`,
+    };
+  }
+
   return null;
 }
 
@@ -260,6 +279,17 @@ export async function GET() {
         participants,
         spawn_time: `${dt.date} ${dt.time}`,
       };
+
+      // 과거 수동 입력으로 같은 날짜/보스에 spawn_time이 비어 있는
+      // 임시 기록이 남아 있으면 실제 시트 기록이 화면에서 섞이지 않도록 제거합니다.
+      // 실제 시트 기록은 항상 deterministic id로 별도 보존됩니다.
+      const { error: staleError } = await admin
+        .from("boss_records")
+        .delete()
+        .eq("date", dt.date)
+        .eq("boss", boss)
+        .or("spawn_time.is.null,spawn_time.eq.");
+      if (staleError) errors.push(`${boss}: 기존 빈 젠 시간 기록 정리 실패: ${staleError.message}`);
 
       const { error } = await admin.from("boss_records").upsert(record, { onConflict: "id" });
       if (error) {
