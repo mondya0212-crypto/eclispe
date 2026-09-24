@@ -16,6 +16,7 @@ create table if not exists public.members (
 alter table public.members add column if not exists memo text default '';
 alter table public.members add column if not exists job text default '';
 alter table public.members add column if not exists power integer not null default 0;
+alter table public.attendance add column if not exists attendance_time text default '';
 create unique index if not exists members_name_unique on public.members(name);
 
 create table if not exists public.boss_records (
@@ -52,11 +53,14 @@ create table if not exists public.attendance (
   discord_user_id text default '',
   discord_display_name text default '',
   attendance_date date not null default current_date,
+  attendance_time text default '',
   status text not null default 'present',
   source text not null default 'discord',
   created_at timestamptz not null default now(),
   unique (member_name, attendance_date)
 );
+
+alter table public.attendance add column if not exists attendance_time text default '';
 
 create index if not exists members_name_idx on public.members(name);
 create index if not exists boss_records_date_idx on public.boss_records(date desc);

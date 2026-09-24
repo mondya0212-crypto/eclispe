@@ -74,6 +74,27 @@ function parseDateTime(value: string): { date: string; time: string } | null {
   };
 }
 
+function parseTimeOnly(value: string): string | null {
+  const v = value.trim();
+  if (!v) return null;
+  const m = v.match(/^(오전|오후|AM|PM)?\s*(\d{1,2})(?::(\d{2}))(?::(\d{2}))?$/i);
+  if (!m) return null;
+  const [, periodRaw, hhRaw, mmRaw, ssRaw = "00"] = m;
+  let hh = Number(hhRaw);
+  const period = String(periodRaw || "").toLowerCase();
+  if ((period === "오후" || period === "pm") && hh < 12) hh += 12;
+  if ((period === "오전" || period === "am") && hh === 12) hh = 0;
+  if (hh > 23 || Number(mmRaw) > 59 || Number(ssRaw) > 59) return null;
+  return `${String(hh).padStart(2, "0")}:${mmRaw}:${ssRaw}`;
+}
+
+function parseAttendanceTimestamp(value: string, fallbackDate: string): { date: string; time: string } | null {
+  const parsed = parseDateTime(value);
+  if (parsed) return parsed;
+  const time = parseTimeOnly(value);
+  return time ? { date: fallbackDate, time } : null;
+}
+
 function weekOfMonth(date: string) {
   const day = Number(date.slice(8, 10));
   return Math.min(5, Math.max(1, Math.ceil(day / 7)));
@@ -132,6 +153,7 @@ export async function GET() {
       participants: string[];
       scoreValues: number[];
       attendedDates: string[];
+      attendanceTimes: string[];
     }>();
 
     for (let i = 1; i < rows.length; i++) {
@@ -139,9 +161,11 @@ export async function GET() {
       const boss = String(r[bossIdx] ?? "").trim();
       const spawnRaw = String(r[spawnIdx] ?? "").trim();
       const participants = String(r[participantsIdx] ?? "")
-        .split(",")
-        .map(v => v.trim())
-        .filter(Boolean);
+        // Form/Sheet cells can contain comma, newline, slash or pipe separated names.
+        .split(/[,\n\r;|/、]+/)
+        .map(v => v.replace(/\s+/g, " ").trim())
+        .filter(Boolean)
+        .filter((name, idx, arr) => arr.indexOf(name) === idx);
       if (!boss || !spawnRaw || !participants.length) continue;
 
       const dt = parseDateTime(spawnRaw);
@@ -151,15 +175,21 @@ export async function GET() {
       }
 
       const attendedRaw = attendedIdx >= 0 ? String(r[attendedIdx] ?? "").trim() : "";
-      const attendedDate = parseDateTime(attendedRaw)?.date || dt.date;
-      const key = `${boss}|${spawnRaw}`;
+      const attendedParsed = parseAttendanceTimestamp(attendedRaw, dt.date);
+      const attendedDate = attendedParsed?.date || dt.date;
+      const attendanceTime = attendedParsed?.time || "";
+      // Use the parsed datetime for the identity so formatting differences
+      // such as 2026. 9. 24 22:59:49 vs 2026-09-24 22:59:49 do not create
+      // a second boss record.
+      const key = `${boss}|${dt.date}|${dt.time}`;
       const group = bossGroups.get(key) || {
-        boss, spawnRaw, dt, participants: [], scoreValues: [], attendedDates: [],
+        boss, spawnRaw, dt, participants: [], scoreValues: [], attendedDates: [], attendanceTimes: [],
       };
       for (const name of participants) {
         if (!group.participants.includes(name)) group.participants.push(name);
       }
       group.attendedDates.push(attendedDate);
+      if (attendanceTime) group.attendanceTimes.push(attendanceTime);
 
       const scoreRaw = scoreIdx >= 0 ? String(r[scoreIdx] ?? "").replace(/[,_\s]/g, "") : "";
       const rowScore = Number(scoreRaw);
@@ -167,12 +197,15 @@ export async function GET() {
       bossGroups.set(key, group);
     }
 
-    // 먼저 보스 기록을 모두 모아 한 번에 upsert합니다.
+    // 먼저 시트의 보스 기록을 모두 모읍니다.
+    // 기존 사이트 기록이 예전 random UUID로 저장되어 있더라도
+    // 같은 날짜+보스의 기존 기록을 찾아 갱신하여, 시트와 홈페이지가
+    // 서로 다른 참여자 명단을 동시에 갖는 문제를 방지합니다.
     const bossRecords = [...bossGroups.values()].map((group) => {
       const { boss, spawnRaw, dt, participants } = group;
       const score = group.scoreValues.length ? Math.max(...group.scoreValues) : participants.length;
       return {
-        id: deterministicUuid(`${boss}|${spawnRaw}`),
+        id: deterministicUuid(`${boss}|${dt.date}|${dt.time}`),
         week: weekOfMonth(dt.date),
         date: dt.date,
         boss,
@@ -184,9 +217,29 @@ export async function GET() {
     let synced = 0;
     let attendanceSynced = 0;
     if (bossRecords.length) {
-      const { error } = await admin.from("boss_records").upsert(bossRecords, { onConflict: "id" });
+      // Existing records are loaded once per sync. If a matching deterministic
+      // record exists, update it. Otherwise, if there is exactly one legacy
+      // record for the same date+boss, update that row in place instead of
+      // creating a duplicate that can leave the UI showing stale participants.
+      const dateList = [...new Set(bossRecords.map(r => r.date))];
+      const { data: existingRecords, error: existingError } = await admin
+        .from("boss_records")
+        .select("id,date,boss")
+        .in("date", dateList);
+      if (existingError) errors.push(`기존 보스 기록 조회: ${existingError.message}`);
+
+      const existing = existingRecords || [];
+      const finalRows = bossRecords.map(row => {
+        const same = existing.filter(r => r.date === row.date && r.boss === row.boss);
+        const exact = same.find(r => r.id === row.id);
+        if (exact) return row;
+        if (same.length === 1) return { ...row, id: same[0].id };
+        return row;
+      });
+
+      const { error } = await admin.from("boss_records").upsert(finalRows, { onConflict: "id" });
       if (error) errors.push(`보스 기록 일괄 저장: ${error.message}`);
-      else synced = bossRecords.length;
+      else synced = finalRows.length;
     }
 
     // 출석도 참여자별로 하나씩 요청하지 않고 전체를 한 번에 upsert합니다.
@@ -197,6 +250,7 @@ export async function GET() {
       attendance_date: string;
       status: string;
       source: string;
+      attendance_time: string;
     }>();
     for (const group of bossGroups.values()) {
       const dates = [...new Set(group.attendedDates.length ? group.attendedDates : [group.dt.date])];
@@ -209,6 +263,7 @@ export async function GET() {
             attendance_date: attendanceDate,
             status: "present",
             source: "google_sheet",
+            attendance_time: group.attendanceTimes[0] || "",
           });
         }
       }
