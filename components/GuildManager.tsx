@@ -103,7 +103,7 @@ export default function GuildManager() {
       <header className="topbar">
         <button className="icon-btn menu-toggle" onClick={() => setSidebar(!sidebar)}><Menu size={20} /></button>
         <div><div className="crumb">ECLIPSE GUILD / {title}</div><h1>{title}</h1></div>
-        <button className="refresh" onClick={load} title="새로고침"><RefreshCw size={16} /></button>
+        <button className="refresh" onClick={() => void load(true)} title="새로고침"><RefreshCw size={16} /></button>
       </header>
       <section className="content">
         {loading ? <div className="loading-page"><div className="loading-dot" /> 데이터를 불러오는 중...</div> : <>
