@@ -53,7 +53,7 @@ export default function GuildManager() {
   const syncInProgressRef = useRef(false);
   const refreshInProgressRef = useRef(false);
 
-  const fetchWithTimeout = async (url: string, timeoutMs = 55000) => {
+  const fetchWithTimeout = async (url: string, timeoutMs = 15000) => {
     const controller = new AbortController();
     const timer = window.setTimeout(() => controller.abort(), timeoutMs);
     try {
@@ -185,8 +185,12 @@ export default function GuildManager() {
       if (!stopped) timer = window.setTimeout(() => { void runBackgroundSync(); }, 30000);
     };
 
-    // 첫 진입도 화면을 띄운 뒤 조용히 최신 시트 데이터를 반영합니다.
-    void runBackgroundSync();
+    // 첫 화면은 Supabase 데이터만 즉시 읽어 띄우고, 시트 동기화는 화면 뒤에서 시작합니다.
+    void (async () => {
+      await refreshDataSilently();
+      if (!stopped) setLoading(false);
+      void runBackgroundSync();
+    })();
 
     const channel = supabase.channel("guild-live")
       .on("postgres_changes", { event: "*", schema: "public", table: "members" }, () => { void refreshDataSilently(); })
