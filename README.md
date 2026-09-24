@@ -16,7 +16,7 @@ Supabase members
 ECLIPSE 길드원 목록
 ```
 
-사이트를 새로 열거나 수동 새로고침하면 즉시 동기화하고, 페이지가 열려 있는 동안에는 **5초마다 Google Sheet의 최신 내용을 다시 읽습니다.**
+사이트를 새로 열거나 수동 새로고침하면 즉시 동기화하고, 페이지가 열려 있는 동안에는 **3초마다 보스/출석 기록을, 30초마다 길드원 명단을 Google Sheet에서 다시 읽습니다.**
 
 사용 시트:
 - Spreadsheet ID: `10TUvN2-5otNh22h8ABDT3bzek6anbUxeJhjodvBfQzE`
@@ -99,7 +99,7 @@ Google Form → Sheet가 정상적으로 업데이트되기만 하면 됩니다.
 배포용 버전에는 다음 안정화가 적용되어 있습니다.
 - 관리자 비밀번호를 `NEXT_PUBLIC_ADMIN_PASSWORD` 환경변수에서 읽습니다.
 - Google Sheet 동기화와 Realtime 이벤트가 서로 무한 반복되는 문제를 방지했습니다.
-- Sheet 동기화는 초기 로드, 수동 새로고침, 5초 주기에서 실행됩니다.
+- Sheet 동기화는 초기 로드, 수동 새로고침, 3초 주기(보스/출석)와 30초 주기(길드원 명단)에서 실행됩니다.
 - `.gitignore`와 `vercel.json`을 포함했습니다.
 
 자세한 순서는 `DEPLOY_VERCEL.md`를 참고하세요.

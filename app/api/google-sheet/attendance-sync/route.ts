@@ -4,6 +4,7 @@ import { createClient } from "@supabase/supabase-js";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
+export const fetchCache = "force-no-store";
 
 const SHEET_ID = process.env.GOOGLE_SHEET_ID || "10TUvN2-5otNh22h8ABDT3bzek6anbUxeJhjodvBfQzE";
 // '출석 기록' 탭의 GID (봇이 사용하는 출석 기록 시트)
@@ -94,7 +95,7 @@ export async function GET() {
       return NextResponse.json({ ok: false, error: "SUPABASE_SERVICE_ROLE_KEY 환경변수가 없습니다." }, { status: 500 });
     }
 
-    const response = await fetch(`${CSV_URL}&_ts=${Date.now()}`, { cache: "no-store" });
+    const response = await fetch(`${CSV_URL}&_ts=${Date.now()}-${Math.random().toString(36).slice(2)}`, { cache: "no-store", next: { revalidate: 0 } });
     if (!response.ok) {
       return NextResponse.json({ ok: false, error: `Google Sheets 출석 기록 응답 오류: ${response.status}` }, { status: 502 });
     }
@@ -121,13 +122,9 @@ export async function GET() {
     }
 
     const admin = createClient(url, key, { auth: { autoRefreshToken: false, persistSession: false } });
-    let synced = 0;
-    let attendanceSynced = 0;
     const errors: string[] = [];
 
-    // 출석 기록 시트는 보통 "한 행 = 한 참여자" 구조입니다.
-    // 같은 보스/젠 시간의 여러 행을 하나의 보스 기록으로 합쳐야
-    // 마지막 참여자만 남는 문제가 생기지 않습니다.
+    // 시트 행을 먼저 메모리에서 그룹화합니다. DB 요청은 아래에서 일괄 처리합니다.
     const bossGroups = new Map<string, {
       boss: string;
       spawnRaw: string;
@@ -159,11 +156,10 @@ export async function GET() {
       const group = bossGroups.get(key) || {
         boss, spawnRaw, dt, participants: [], scoreValues: [], attendedDates: [],
       };
-
       for (const name of participants) {
         if (!group.participants.includes(name)) group.participants.push(name);
       }
-      if (attendedDate) group.attendedDates.push(attendedDate);
+      group.attendedDates.push(attendedDate);
 
       const scoreRaw = scoreIdx >= 0 ? String(r[scoreIdx] ?? "").replace(/[,_\s]/g, "") : "";
       const rowScore = Number(scoreRaw);
@@ -171,49 +167,64 @@ export async function GET() {
       bossGroups.set(key, group);
     }
 
-    for (const group of bossGroups.values()) {
+    // 먼저 보스 기록을 모두 모아 한 번에 upsert합니다.
+    const bossRecords = [...bossGroups.values()].map((group) => {
       const { boss, spawnRaw, dt, participants } = group;
-      // 참여 점수가 행마다 반복되는 경우에는 중복 합산하지 않도록 최대값을 사용하고,
-      // 값이 없으면 참여 인원 수를 기본 점수로 사용합니다.
       const score = group.scoreValues.length ? Math.max(...group.scoreValues) : participants.length;
-      const id = deterministicUuid(`${boss}|${spawnRaw}`);
-      const record = {
-        id,
+      return {
+        id: deterministicUuid(`${boss}|${spawnRaw}`),
         week: weekOfMonth(dt.date),
         date: dt.date,
         boss,
         score,
         participants,
       };
+    });
 
-      const { error } = await admin.from("boss_records").upsert(record, { onConflict: "id" });
-      if (error) {
-        errors.push(`${boss}: ${error.message}`);
-        continue;
-      }
-      synced++;
+    let synced = 0;
+    let attendanceSynced = 0;
+    if (bossRecords.length) {
+      const { error } = await admin.from("boss_records").upsert(bossRecords, { onConflict: "id" });
+      if (error) errors.push(`보스 기록 일괄 저장: ${error.message}`);
+      else synced = bossRecords.length;
+    }
 
-      // 사이트의 'Discord 출석'도 시트에서 함께 채웁니다.
-      // 같은 사람이 같은 날짜에 여러 보스에 참여해도 출석은 1회로 유지합니다.
-      const attendedDates = [...new Set(group.attendedDates.length ? group.attendedDates : [dt.date])];
-      for (const name of participants) {
-        for (const attendedDate of attendedDates) {
-          const { error: attendanceError } = await admin.from("attendance").upsert({
+    // 출석도 참여자별로 하나씩 요청하지 않고 전체를 한 번에 upsert합니다.
+    const attendanceMap = new Map<string, {
+      member_name: string;
+      discord_user_id: string;
+      discord_display_name: string;
+      attendance_date: string;
+      status: string;
+      source: string;
+    }>();
+    for (const group of bossGroups.values()) {
+      const dates = [...new Set(group.attendedDates.length ? group.attendedDates : [group.dt.date])];
+      for (const name of group.participants) {
+        for (const attendanceDate of dates) {
+          attendanceMap.set(`${name}|${attendanceDate}`, {
             member_name: name,
             discord_user_id: "",
             discord_display_name: name,
-            attendance_date: attendedDate,
+            attendance_date: attendanceDate,
             status: "present",
             source: "google_sheet",
-          }, { onConflict: "member_name,attendance_date" });
-          if (!attendanceError) attendanceSynced++;
-          else errors.push(`${name} ${attendedDate}: ${attendanceError.message}`);
+          });
         }
       }
     }
+    const attendanceRows = [...attendanceMap.values()];
+    if (attendanceRows.length) {
+      const { error } = await admin.from("attendance").upsert(attendanceRows, { onConflict: "member_name,attendance_date" });
+      if (error) errors.push(`출석 일괄 저장: ${error.message}`);
+      else attendanceSynced = attendanceRows.length;
+    }
 
     return NextResponse.json({
-      ok: errors.length === 0,
+      // CSV를 정상적으로 읽고 하나라도 저장했다면 동기화 성공으로 봅니다.
+      // 일부 출석 upsert 오류가 있어도 보스 기록까지 실패한 것으로 취급하지 않습니다.
+      ok: synced > 0 || rows.length <= 1,
+      partial: errors.length > 0,
       synced,
       attendance: attendanceSynced,
       rows: rows.length - 1,
@@ -226,7 +237,10 @@ export async function GET() {
         spawn: headers[spawnIdx] ?? "",
       },
       fetchedAt: new Date().toISOString(),
-    }, { status: errors.length ? 207 : 200 });
+    }, {
+      status: synced > 0 || rows.length <= 1 ? 200 : 500,
+      headers: { "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate" },
+    });
   } catch (error) {
     return NextResponse.json({ ok: false, error: error instanceof Error ? error.message : "출석 기록 동기화 실패" }, { status: 500 });
   }

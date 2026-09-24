@@ -52,6 +52,7 @@ export default function GuildManager() {
   // 자동 동기화가 겹치지 않도록 잠금합니다.
   const syncInProgressRef = useRef(false);
   const refreshInProgressRef = useRef(false);
+  const lastMemberSyncAtRef = useRef(0);
 
   const fetchWithTimeout = async (url: string, timeoutMs = 15000) => {
     const controller = new AbortController();
@@ -69,25 +70,35 @@ export default function GuildManager() {
     syncInProgressRef.current = true;
 
     try {
-      // 두 API를 동시에 호출하지 않고 순차 처리합니다.
-      // 길드원 동기화가 끝난 뒤 출석 기록을 동기화합니다.
-      const memberResponse = await fetchWithTimeout("/api/google-sheet/sync");
-      const memberResult = await memberResponse.json().catch(() => null);
-
-      if (!memberResponse.ok || !memberResult?.ok) {
-        console.warn("Google Sheets 길드원 명단 자동 동기화 실패:", memberResult?.error || memberResponse.status);
-        return false;
+      // 두 동기화는 서로 독립적으로 실행합니다.
+      // 길드원 시트에 문제가 있어도 보스/출석 시트는 반드시 읽습니다.
+      const now = Date.now();
+      // 보스/출석은 5초마다 확인하고, 길드원 명단은 30초마다 확인합니다.
+      // 길드원 명단까지 매번 읽으면 불필요한 Google Sheets 요청이 반복됩니다.
+      const shouldSyncMembers = now - lastMemberSyncAtRef.current >= 30000;
+      const requests: Promise<Response>[] = [
+        fetchWithTimeout(`/api/google-sheet/attendance-sync?_ts=${now}`),
+      ];
+      if (shouldSyncMembers) {
+        lastMemberSyncAtRef.current = now;
+        requests.push(fetchWithTimeout(`/api/google-sheet/sync?_ts=${now}`));
       }
-
-      const attendanceResponse = await fetchWithTimeout("/api/google-sheet/attendance-sync");
+      const responses = await Promise.all(requests);
+      const attendanceResponse = responses[0];
+      const memberResponse = shouldSyncMembers ? responses[1] : null;
       const attendanceResult = await attendanceResponse.json().catch(() => null);
+      const memberResult = memberResponse ? await memberResponse.json().catch(() => null) : null;
 
+      if (memberResponse && (!memberResponse.ok || !memberResult?.ok)) {
+        console.warn("Google Sheets 길드원 명단 자동 동기화 실패:", memberResult?.error || memberResponse.status);
+      }
       if (!attendanceResponse.ok || !attendanceResult?.ok) {
-        console.warn("Google Sheets 출석 기록 자동 동기화 실패:", attendanceResult?.error || attendanceResponse.status);
-        return false;
+        console.warn("Google Sheets 출석/보스 자동 동기화 실패:", attendanceResult?.error || attendanceResponse.status);
       }
 
-      return true;
+      // 둘 중 하나라도 실제 시트를 읽고 처리했다면 Supabase를 다시 읽습니다.
+      // 한쪽 API의 일부 오류 때문에 다른 쪽 보스 기록이 화면에서 사라지지 않게 합니다.
+      return Boolean(memberResponse || attendanceResult?.ok || attendanceResult?.synced > 0);
     } catch (error) {
       // 자동 동기화 오류는 사용자 화면에 띄우지 않고 콘솔에만 기록합니다.
       const message = error instanceof DOMException && error.name === "AbortError"
@@ -132,8 +143,8 @@ export default function GuildManager() {
     if (syncSheet) {
       try {
         const [memberResponse, attendanceResponse] = await Promise.all([
-          fetch("/api/google-sheet/sync", { cache: "no-store" }),
-          fetch("/api/google-sheet/attendance-sync", { cache: "no-store" }),
+          fetch(`/api/google-sheet/sync?_ts=${Date.now()}`, { cache: "no-store" }),
+          fetch(`/api/google-sheet/attendance-sync?_ts=${Date.now()}`, { cache: "no-store" }),
         ]);
         const memberResult = await memberResponse.json().catch(() => null);
         const attendanceResult = await attendanceResponse.json().catch(() => null);
@@ -169,12 +180,12 @@ export default function GuildManager() {
   };
 
   useEffect(() => {
-    // 최초 데이터 로딩 후, Google Sheets의 길드원 명단과 출석 기록을
-    // 5초마다 화면 깜빡임 없이 백그라운드에서 조용히 동기화합니다.
+    // 최초 데이터 로딩 후, Google Sheets의 보스/출석 기록을 5초마다,
+    // 길드원 명단은 30초마다 화면 깜빡임 없이 백그라운드 동기화합니다.
     let stopped = false;
     let timer: number | undefined;
 
-    // 한 번의 동기화가 끝난 뒤 5초를 기다립니다.
+    // 한 번의 동기화가 끝난 뒤 3초를 기다립니다.
     // Google Sheets는 push 이벤트를 제공하지 않으므로 짧은 폴링으로
     // 시트 변경을 거의 실시간으로 반영하고, 동기화가 겹치지 않도록 합니다.
     const runBackgroundSync = async () => {
@@ -183,7 +194,7 @@ export default function GuildManager() {
       if (stopped) return;
       // 시트가 성공했든 실패했든 화면 데이터는 조용히 확인합니다.
       if (synced) await refreshDataSilently();
-      if (!stopped) timer = window.setTimeout(() => { void runBackgroundSync(); }, 5000);
+      if (!stopped) timer = window.setTimeout(() => { void runBackgroundSync(); }, 3000);
     };
 
     // 첫 화면은 Supabase 데이터만 즉시 읽어 띄우고, 시트 동기화는 화면 뒤에서 시작합니다.

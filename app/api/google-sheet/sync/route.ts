@@ -3,6 +3,7 @@ import { createClient } from "@supabase/supabase-js";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
+export const fetchCache = "force-no-store";
 
 const SHEET_ID = process.env.GOOGLE_SHEET_ID || "10TUvN2-5otNh22h8ABDT3bzek6anbUxeJhjodvBfQzE";
 const SHEET_GID = process.env.GOOGLE_SHEET_GID || "1397643408";
@@ -57,7 +58,7 @@ function headerIndex(headers: string[], names: string[], containsTokens: string[
 
 export async function GET() {
   try {
-    const response = await fetch(`${CSV_URL}&_ts=${Date.now()}`, { cache: "no-store" });
+    const response = await fetch(`${CSV_URL}&_ts=${Date.now()}-${Math.random().toString(36).slice(2)}`, { cache: "no-store", next: { revalidate: 0 } });
     if (!response.ok) return NextResponse.json({ ok: false, error: `Google Sheets 응답 오류: ${response.status}` }, { status: 502 });
     const text = await response.text();
     if (!text || text.trim().startsWith("<!DOCTYPE") || text.includes("Sign in")) {
@@ -91,39 +92,28 @@ export async function GET() {
     if (!url || !key) return NextResponse.json({ ok: false, error: "SUPABASE_SERVICE_ROLE_KEY 환경변수가 없습니다." }, { status: 500 });
     const admin = createClient(url, key, { auth: { autoRefreshToken: false, persistSession: false } });
 
-    let synced = 0;
-    const errors: Array<{ row: number; name: string; error: string }> = [];
-    for (const m of members) {
-      // Google Sheet is the source of truth for name/job/power.
-      // memo remains editable from the website, so a blank sheet memo never erases it.
-      const { data: existing, error: findError } = await admin.from("members").select("id,memo").eq("name", m.name).maybeSingle();
-      if (findError) {
-        errors.push({ row: m.row, name: m.name, error: findError.message });
-        continue;
-      }
+    const payloads: Array<Record<string, unknown>> = members.map((m) => {
       const payload: Record<string, unknown> = { name: m.name, job: m.job, power: m.power };
+      // 빈 메모리는 기존 웹 메모리를 지우지 않습니다.
       if (m.memo) payload.memo = m.memo;
-      const result = existing?.id
-        ? await admin.from("members").update(payload).eq("id", existing.id)
-        : await admin.from("members").insert(payload);
-      if (result.error) {
-        errors.push({ row: m.row, name: m.name, error: result.error.message });
-      } else {
-        synced++;
-      }
-    }
+      return payload;
+    });
 
-    if (errors.length) {
+    // 행마다 SELECT -> UPDATE/INSERT 하던 기존 방식은 길드원이 많을수록 매우 느렸습니다.
+    // Supabase bulk upsert 한 번으로 처리해 동기화 시간을 크게 줄입니다.
+    const result = payloads.length
+      ? await admin.from("members").upsert(payloads, { onConflict: "name" })
+      : { error: null };
+    if (result.error) {
       return NextResponse.json({
         ok: false,
-        error: `일부 길드원 저장에 실패했습니다. ${errors.length}건`,
-        synced,
+        error: `길드원 일괄 저장에 실패했습니다: ${result.error.message}`,
+        synced: 0,
         rows: members.length,
-        failed: errors.length,
-        errors: errors.slice(0, 20),
         sheet: { id: SHEET_ID, gid: SHEET_GID },
       }, { status: 500 });
     }
+    const synced = members.length;
 
     return NextResponse.json({ ok: true, synced, rows: members.length, members, sheet: { id: SHEET_ID, gid: SHEET_GID }, columns: { name: headers[nameIdx] ?? "", job: jobIdx >= 0 ? headers[jobIdx] : "찾지 못함", power: headers[powerIdx] ?? "", memo: memoIdx >= 0 ? headers[memoIdx] : "없음" }, jobValues: [...new Set(members.map(m => m.job).filter(Boolean))].slice(0, 30), fetchedAt: new Date().toISOString() });
   } catch (error) {
