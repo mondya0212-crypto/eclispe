@@ -17,7 +17,10 @@ alter table public.members add column if not exists memo text default '';
 alter table public.members add column if not exists job text default '';
 alter table public.members add column if not exists power integer not null default 0;
 alter table public.attendance add column if not exists attendance_time text default '';
+-- 이름 기준 Google Sheets bulk upsert에 사용하는 고유 제약입니다.
+-- 기존 DB에 중복 이름이 있다면 먼저 중복을 정리한 뒤 실행하세요.
 create unique index if not exists members_name_unique on public.members(name);
+
 
 create table if not exists public.boss_records (
   id uuid primary key default gen_random_uuid(),

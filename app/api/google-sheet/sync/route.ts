@@ -101,13 +101,41 @@ export async function GET() {
 
     // 행마다 SELECT -> UPDATE/INSERT 하던 기존 방식은 길드원이 많을수록 매우 느렸습니다.
     // Supabase bulk upsert 한 번으로 처리해 동기화 시간을 크게 줄입니다.
-    const result = payloads.length
-      ? await admin.from("members").upsert(payloads, { onConflict: "name" })
-      : { error: null };
-    if (result.error) {
+    let syncError: string | null = null;
+    if (payloads.length) {
+      // 정상적인 경우에는 이름 unique key를 이용한 bulk upsert 한 번으로 끝냅니다.
+      const result = await admin.from("members").upsert(payloads, { onConflict: "name" });
+      if (result.error) {
+        // 기존 DB가 오래된 스키마이거나 members_name_unique 인덱스가 실제
+        // constraint로 인식되지 않는 경우에도 시트 동기화가 막히지 않도록
+        // 기존 회원은 id 기준 일괄 UPDATE, 신규 회원은 일괄 INSERT 합니다.
+        const names = payloads.map(p => String(p.name));
+        const { data: existingMembers, error: lookupError } = await admin
+          .from("members")
+          .select("id,name")
+          .in("name", names);
+
+        if (lookupError) {
+          syncError = `길드원 저장 실패: ${result.error.message} / 기존 회원 조회 실패: ${lookupError.message}`;
+        } else {
+          const existingByName = new Map((existingMembers || []).map(m => [m.name, m.id]));
+          const updates = payloads.filter(p => existingByName.has(String(p.name)));
+          const inserts = payloads.filter(p => !existingByName.has(String(p.name)));
+          const updateResults = await Promise.all(updates.map(p =>
+            admin.from("members").update({ job: p.job, power: p.power, ...(p.memo ? { memo: p.memo } : {}) }).eq("id", existingByName.get(String(p.name))!)
+          ));
+          const updateError = updateResults.find(r => r.error)?.error;
+          const insertResult = inserts.length ? await admin.from("members").insert(inserts) : { error: null };
+          if (updateError || insertResult.error) {
+            syncError = `길드원 저장 실패: ${updateError?.message || insertResult.error?.message || result.error.message}`;
+          }
+        }
+      }
+    }
+    if (syncError) {
       return NextResponse.json({
         ok: false,
-        error: `길드원 일괄 저장에 실패했습니다: ${result.error.message}`,
+        error: syncError,
         synced: 0,
         rows: members.length,
         sheet: { id: SHEET_ID, gid: SHEET_GID },
