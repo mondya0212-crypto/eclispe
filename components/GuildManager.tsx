@@ -135,12 +135,15 @@ export default function GuildManager() {
       const attendanceResponse = await fetchWithTimeout("/api/google-sheet/attendance-sync");
       const attendanceResult = await attendanceResponse.json().catch(() => null);
 
-      if (!attendanceResponse.ok || !attendanceResult?.ok) {
+      if (!attendanceResponse.ok || !attendanceResult) {
         console.warn("Google Sheets 출석 기록 자동 동기화 실패:", attendanceResult?.error || attendanceResponse.status);
         return false;
       }
 
-      return true;
+      // 보스 기록이 반영된 경우 출석 일부 오류가 있어도 반드시 최신 DB를 다시 읽습니다.
+      // 이전에는 attendance 오류 하나 때문에 화면 갱신 자체가 건너뛰어
+      // 이미 Supabase에 들어간 젠 시간이 화면에 늦게 나타날 수 있었습니다.
+      return Number(attendanceResult?.synced ?? 0) >= 0;
     } catch (error) {
       // 자동 동기화 오류는 사용자 화면에 띄우지 않고 콘솔에만 기록합니다.
       const message = error instanceof DOMException && error.name === "AbortError"
@@ -159,7 +162,7 @@ export default function GuildManager() {
     try {
     const [membersResult, recordsResult, distributionsResult, memosResult, attendanceResult] = await Promise.all([
       supabase.from("members").select("*").order("name"),
-      supabase.from("boss_records").select("*").order("date", { ascending: false }),
+      supabase.from("boss_records").select("*").order("date", { ascending: false }).limit(5000),
       supabase.from("distribution_records").select("*").order("date", { ascending: false }),
       supabase.from("admin_memos").select("*").order("created_at", { ascending: false }),
       supabase.from("attendance").select("*").order("attendance_date", { ascending: false }),
@@ -203,7 +206,7 @@ export default function GuildManager() {
     }
     const [{ data: members, error: membersError }, { data: records, error: recordsError }, { data: distributions, error: distributionError }, { data: memos, error: memosError }, { data: attendance, error: attendanceError }] = await Promise.all([
       supabase.from("members").select("*").order("name"),
-      supabase.from("boss_records").select("*").order("date", { ascending: false }),
+      supabase.from("boss_records").select("*").order("date", { ascending: false }).limit(5000),
       supabase.from("distribution_records").select("*").order("date", { ascending: false }),
       supabase.from("admin_memos").select("*").order("created_at", { ascending: false }),
       supabase.from("attendance").select("*").order("attendance_date", { ascending: false }),

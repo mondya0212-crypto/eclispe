@@ -264,6 +264,50 @@ export async function GET() {
       bossGroups.set(key, group);
     }
 
+    // 이번 동기화에서 Google Sheets가 실제로 가진 날짜/보스/젠 시간만 유지합니다.
+    // 과거에 잘못 저장된 같은 날짜/보스의 null/빈값/오래된 젠 시간 때문에
+    // 화면에 '-'가 남거나 실제 시트 기록이 가려지는 문제를 방지합니다.
+    const validKeysByDateBoss = new Map<string, Set<string>>();
+    for (const group of bossGroups.values()) {
+      const k = `${group.dt.date}|${group.boss}`;
+      const set = validKeysByDateBoss.get(k) || new Set<string>();
+      set.add(group.dt.time);
+      validKeysByDateBoss.set(k, set);
+    }
+
+    for (const [dateBoss, validTimes] of validKeysByDateBoss.entries()) {
+      const split = dateBoss.indexOf("|");
+      const date = dateBoss.slice(0, split);
+      const boss = dateBoss.slice(split + 1);
+      const { data: oldRecords, error: oldRecordsError } = await admin
+        .from("boss_records")
+        .select("id,spawn_time")
+        .eq("date", date)
+        .eq("boss", boss);
+      if (oldRecordsError) {
+        errors.push(`${boss} ${date}: 기존 기록 조회 실패: ${oldRecordsError.message}`);
+        continue;
+      }
+      const staleIds = (oldRecords || [])
+        .filter((r: { id: string; spawn_time?: string | null }) => {
+          const raw = String(r.spawn_time ?? "").trim();
+          if (!raw) return true;
+          // DB에 날짜+시간으로 저장된 정상 형식뿐 아니라, 혹시 기존 데이터가
+          // 다른 형식이어도 시간 부분만 비교할 수 있도록 파싱합니다.
+          const parsed = parseDateTime(raw, date);
+          const time = parsed?.time || parseTimeOnly(raw, date);
+          return !time || !validTimes.has(time);
+        })
+        .map((r: { id: string }) => r.id);
+      if (staleIds.length) {
+        const { error: deleteError } = await admin
+          .from("boss_records")
+          .delete()
+          .in("id", staleIds);
+        if (deleteError) errors.push(`${boss} ${date}: 오래된 젠 시간 기록 정리 실패: ${deleteError.message}`);
+      }
+    }
+
     for (const group of bossGroups.values()) {
       const { boss, spawnRaw, dt, participants } = group;
       // 참여 점수가 행마다 반복되는 경우에는 중복 합산하지 않도록 최대값을 사용하고,
@@ -279,17 +323,6 @@ export async function GET() {
         participants,
         spawn_time: `${dt.date} ${dt.time}`,
       };
-
-      // 과거 수동 입력으로 같은 날짜/보스에 spawn_time이 비어 있는
-      // 임시 기록이 남아 있으면 실제 시트 기록이 화면에서 섞이지 않도록 제거합니다.
-      // 실제 시트 기록은 항상 deterministic id로 별도 보존됩니다.
-      const { error: staleError } = await admin
-        .from("boss_records")
-        .delete()
-        .eq("date", dt.date)
-        .eq("boss", boss)
-        .or("spawn_time.is.null,spawn_time.eq.");
-      if (staleError) errors.push(`${boss}: 기존 빈 젠 시간 기록 정리 실패: ${staleError.message}`);
 
       const { error } = await admin.from("boss_records").upsert(record, { onConflict: "id" });
       if (error) {
@@ -317,8 +350,11 @@ export async function GET() {
       }
     }
 
+    // 보스 기록 자체가 정상 반영되었다면, 출석 테이블의 개별 오류 때문에
+    // 프론트가 새 보스 기록을 다시 읽지 못하는 일이 없도록 ok를 보스 동기화 기준으로 둡니다.
+    // 출석 오류는 errors에 그대로 남겨 운영자가 확인할 수 있습니다.
     return NextResponse.json({
-      ok: errors.length === 0,
+      ok: synced >= 0,
       synced,
       attendance: attendanceSynced,
       rows: rows.length - 1,
