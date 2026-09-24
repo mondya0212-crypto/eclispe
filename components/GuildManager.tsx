@@ -42,6 +42,34 @@ function requireAdmin(): boolean {
 
 function formatNumber(value: number) { return Number(value || 0).toLocaleString("ko-KR"); }
 
+// 보스 젠 시간은 날짜와 무관하게 시간만 표시합니다.\n// 시트 동기화 값(YYYY-MM-DD HH:mm[:ss])과 기존 datetime-local 값 모두 처리합니다.
+function formatSpawnTime(value?: string | null) {
+  const v = String(value ?? "").trim().replace(/\u00a0/g, " ").replace(/\s+/g, " ");
+  if (!v) return "-";
+
+  // 날짜가 포함된 값: YYYY-MM-DD HH:mm:ss / YYYY.MM.DD 오후 9:10:30 등
+  let m = v.match(/(?:T|\s)(?:오전|오후|AM|PM)?\s*(\d{1,2}):\s*(\d{2})(?::\s*(\d{2}))?/i);
+  if (m) {
+    let h = Number(m[1]);
+    const period = (v.match(/(?:^|\s)(오전|오후|AM|PM)\s*\d/i)?.[1] || "").toLowerCase();
+    if ((period === "오후" || period === "pm") && h < 12) h += 12;
+    if ((period === "오전" || period === "am") && h === 12) h = 0;
+    return `${String(h).padStart(2, "0")}:${m[2]}:${m[3] || "00"}`;
+  }
+
+  // 시간만 있는 값: 21:10:30 / 오후 9:10:30 / 오후 9시 10분 30초
+  m = v.match(/^(오전|오후|AM|PM)?\s*(\d{1,2})\s*:\s*(\d{2})(?:\s*:\s*(\d{2}))?$/i);
+  if (!m) m = v.match(/^(오전|오후|AM|PM)?\s*(\d{1,2})\s*시\s*(\d{1,2})\s*분(?:\s*(\d{1,2})\s*초)?$/i);
+  if (m) {
+    let h = Number(m[2]);
+    const period = (m[1] || "").toLowerCase();
+    if ((period === "오후" || period === "pm") && h < 12) h += 12;
+    if ((period === "오전" || period === "am") && h === 12) h = 0;
+    return `${String(h).padStart(2, "0")}:${String(m[3]).padStart(2, "0")}:${String(m[4] || "00").padStart(2, "0")}`;
+  }
+  return v;
+}
+
 function uniqueBossRecords(records: BossRecord[]) {
   const seen = new Set<string>();
   return records.filter(r => {
@@ -422,7 +450,7 @@ function BossRecords({ data, setData }: { data: AppData; setData: React.Dispatch
   const toggle = (name: string) => setSelected(s => s.includes(name) ? s.filter(x => x !== name) : [...s, name]);
   return <div className="stack"><PageIntro title="⚔️ 보스 참여 기록" desc="보스별 참여자를 저장하고 수정할 수 있습니다." />
     <div className="panel"><div className="panel-title"><span>➕ 참여 기록 추가</span><button className="danger-outline small" onClick={resetAll}><Lock size={13} /> 전체 초기화</button></div><div className="form-grid boss-form"><input type="date" value={date} onChange={e => setDate(e.target.value)} /><input placeholder="보스 이름" value={boss} onChange={e => setBoss(e.target.value)} /><input type="datetime-local" value={spawnTime} onChange={e => setSpawnTime(e.target.value)} /><input type="number" placeholder="보스 점수" value={score} onChange={e => setScore(e.target.value)} /></div><div className="member-picker">{data.members.map(m => <button key={m.id} className={selected.includes(m.name) ? "selected" : ""} onClick={() => toggle(m.name)}>{m.name}</button>)}</div><button className="primary" disabled={saving} onClick={add}><Plus size={16} /> {saving ? "저장 중..." : `참여 기록 저장 (${selected.length}명)`}</button></div>
-    <div className="panel table-panel"><div className="table-wrap"><table className="boss-table"><thead><tr><th>날짜</th><th>보스</th><th>젠 시간</th><th>점수</th><th>참여자</th><th>관리</th></tr></thead><tbody>{data.records.map(r => <tr key={r.id}><td>{r.date}</td><td className="strong">{r.boss}</td><td>{r.spawn_time || "-"}</td><td>{formatNumber(r.score)}</td><td>{r.participants?.length ? r.participants.join(", ") : "-"}</td><td><div className="actions"><button title="수정" onClick={() => startEdit(r)}><Pencil size={14} /></button><button title="삭제" className="danger" onClick={() => del(r.id)}><Trash2 size={14} /></button></div></td></tr>)}</tbody></table></div>{!data.records.length && <Empty text="등록된 기록이 없습니다." />}</div>
+    <div className="panel table-panel"><div className="table-wrap"><table className="boss-table"><thead><tr><th>날짜</th><th>보스</th><th>젠 시간</th><th>점수</th><th>참여자</th><th>관리</th></tr></thead><tbody>{data.records.map(r => <tr key={r.id}><td>{r.date}</td><td className="strong">{r.boss}</td><td>{formatSpawnTime(r.spawn_time)}</td><td>{formatNumber(r.score)}</td><td>{r.participants?.length ? r.participants.join(", ") : "-"}</td><td><div className="actions"><button title="수정" onClick={() => startEdit(r)}><Pencil size={14} /></button><button title="삭제" className="danger" onClick={() => del(r.id)}><Trash2 size={14} /></button></div></td></tr>)}</tbody></table></div>{!data.records.length && <Empty text="등록된 기록이 없습니다." />}</div>
     {editing && <div className="modal-backdrop" onMouseDown={e => { if (e.target === e.currentTarget) resetEdit(); }}><div className="member-edit-modal boss-edit-modal"><div className="modal-head"><div><div className="eyebrow">ECLIPSE BOSS RECORD</div><h3>✏️ 보스 참여 기록 수정</h3></div><button className="icon-btn" onClick={resetEdit}><X size={20} /></button></div><div className="edit-grid"><label>날짜<input type="date" value={date} onChange={e => setDate(e.target.value)} /></label><label>보스 이름<input value={boss} onChange={e => setBoss(e.target.value)} /></label><label>젠 시간<input type="datetime-local" value={spawnTime} onChange={e => setSpawnTime(e.target.value)} /></label><label>보스 점수<input type="number" value={score} onChange={e => setScore(e.target.value)} /></label></div><div className="boss-edit-participants"><span>참여자</span><div className="member-picker">{data.members.map(m => <button key={m.id} className={selected.includes(m.name) ? "selected" : ""} onClick={() => toggle(m.name)}>{m.name}</button>)}</div></div><div className="modal-actions"><button className="secondary" onClick={resetEdit}>취소</button><button className="primary" disabled={saving} onClick={saveEdit}>{saving ? "저장 중..." : "수정 저장"}</button></div></div></div>}
   </div>;
 }

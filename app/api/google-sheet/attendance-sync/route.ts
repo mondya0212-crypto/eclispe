@@ -48,53 +48,60 @@ function findHeader(headers: string[], names: string[], tokens: string[] = []) {
   return normalized.findIndex(h => tokens.some(t => h.includes(normalizeHeader(t))));
 }
 
-function parseDateTime(value: string): { date: string; time: string } | null {
-  let v = String(value ?? "").trim();
-  if (!v) return null;
-
-  // Google Sheets CSV exports can use several locale-dependent formats.
-  // Examples:
-  // 2026. 9. 24 오후 9:10:00
-  // 2026-09-24 21:10:00
-  // 9/24/2026 21:10:00
-  // 09/24/2026 9:10:00 PM
-  v = v.replace(/\u00a0/g, " ").replace(/\s+/g, " ").trim();
-
-  let m = v.match(/^(\d{4})[.\-/](\d{1,2})[.\-/](\d{1,2})(?:\s+|T)(오전|오후|AM|PM)?\s*(\d{1,2})(?::(\d{2}))?(?::(\d{2}))?/i);
-  if (!m) {
-    // US-style month/day/year export from Google Sheets.
-    m = v.match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{4})(?:\s+|T)(오전|오후|AM|PM)?\s*(\d{1,2})(?::(\d{2}))?(?::(\d{2}))?/i);
-    if (m) {
-      const [, mo, d, y, periodRaw, hhRaw, mmRaw = "00", ssRaw = "00"] = m;
-      let hh = Number(hhRaw);
-      const period = String(periodRaw || "").toLowerCase();
-      if ((period === "오후" || period === "pm") && hh < 12) hh += 12;
-      if ((period === "오전" || period === "am") && hh === 12) hh = 0;
-      if (hh > 23 || Number(mmRaw) > 59 || Number(ssRaw) > 59 || Number(mo) < 1 || Number(mo) > 12 || Number(d) < 1 || Number(d) > 31) return null;
-      return {
-        date: `${y}-${String(mo).padStart(2, "0")}-${String(d).padStart(2, "0")}`,
-        time: `${String(hh).padStart(2, "0")}:${String(mmRaw).padStart(2, "0")}:${String(ssRaw).padStart(2, "0")}`,
-      };
-    }
-  }
-
-  if (!m) {
-    // Date-only values are not enough for the spawn-time field.
-    return null;
-  }
-
-  const [, y, mo, d, periodRaw, hhRaw, mmRaw = "00", ssRaw = "00"] = m;
+function normalizeDateParts(y: string, mo: string, d: string, hhRaw: string, mmRaw = "00", ssRaw = "00", periodRaw = "") {
   let hh = Number(hhRaw);
+  const mm = Number(mmRaw);
+  const ss = Number(ssRaw);
   const period = String(periodRaw || "").toLowerCase();
   if ((period === "오후" || period === "pm") && hh < 12) hh += 12;
   if ((period === "오전" || period === "am") && hh === 12) hh = 0;
-  if (hh > 23 || Number(mmRaw) > 59 || Number(ssRaw) > 59 || Number(mo) < 1 || Number(mo) > 12 || Number(d) < 1 || Number(d) > 31) return null;
-
+  if (hh > 23 || hh < 0 || mm > 59 || mm < 0 || ss > 59 || ss < 0 || Number(mo) < 1 || Number(mo) > 12 || Number(d) < 1 || Number(d) > 31) return null;
   return {
     date: `${y}-${String(mo).padStart(2, "0")}-${String(d).padStart(2, "0")}`,
-    time: `${String(hh).padStart(2, "0")}:${String(mmRaw).padStart(2, "0")}:${String(ssRaw).padStart(2, "0")}`,
+    time: `${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}:${String(ss).padStart(2, "0")}`,
   };
 }
+
+function parseTimeParts(value: string): string | null {
+  let v = String(value ?? "").replace(/\u00a0/g, " ").replace(/\s+/g, " ").trim();
+  if (!v) return null;
+
+  // 지원: 21:10:30 / 21:10 / 오후 9:10:30 / 오후 9시 10분 30초 / 21시10분30초
+  let m = v.match(/^(오전|오후|AM|PM)?\s*(\d{1,2})\s*:\s*(\d{2})(?:\s*:\s*(\d{2}))?$/i);
+  if (!m) m = v.match(/^(오전|오후|AM|PM)?\s*(\d{1,2})\s*시\s*(\d{1,2})\s*분(?:\s*(\d{1,2})\s*초)?$/i);
+  if (!m) return null;
+
+  const period = m[1] || "";
+  const hh = m[2];
+  const mm = m[3];
+  const ss = m[4] || "00";
+  let hour = Number(hh);
+  const minute = Number(mm);
+  const second = Number(ss);
+  const p = period.toLowerCase();
+  if ((p === "오후" || p === "pm") && hour < 12) hour += 12;
+  if ((p === "오전" || p === "am") && hour === 12) hour = 0;
+  if (hour > 23 || minute > 59 || second > 59) return null;
+  return `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}:${String(second).padStart(2, "0")}`;
+}
+
+function parseDateTime(value: string): { date: string; time: string } | null {
+  let v = String(value ?? "").replace(/\u00a0/g, " ").replace(/\s+/g, " ").trim();
+  if (!v) return null;
+
+  // 날짜+시간: 2026. 9. 24 오후 9:10:30 / 2026-09-24 21:10:30 / 9/24/2026 9:10:30 PM
+  const ymd = v.match(/^(\d{4})\s*[.\-/]\s*(\d{1,2})\s*[.\-/]\s*(\d{1,2})\s*(?:T|\s+)?(오전|오후|AM|PM)?\s*(\d{1,2})(?::|시)\s*(\d{1,2})(?:분)?(?:\s*(?::|초)\s*(\d{1,2})\s*초?)?/i);
+  if (ymd) return normalizeDateParts(ymd[1], ymd[2], ymd[3], ymd[5], ymd[6], ymd[7] || "00", ymd[4] || "");
+
+  const mdy = v.match(/^(\d{1,2})\s*[\/\-.]\s*(\d{1,2})\s*[\/\-.]\s*(\d{4})\s*(?:T|\s+)?(오전|오후|AM|PM)?\s*(\d{1,2})(?::|시)\s*(\d{1,2})(?:분)?(?:\s*(?::|초)\s*(\d{1,2})\s*초?)?/i);
+  if (mdy) return normalizeDateParts(mdy[3], mdy[1], mdy[2], mdy[5], mdy[6], mdy[7] || "00", mdy[4] || "");
+
+  return null;
+}
+function parseTimeOnly(value: string): string | null {
+  return parseTimeParts(value);
+}
+
 function weekOfMonth(date: string) {
   const day = Number(date.slice(8, 10));
   return Math.min(5, Math.max(1, Math.ceil(day / 7)));
@@ -169,14 +176,25 @@ export async function GET() {
         .filter(Boolean);
       if (!boss || !spawnRaw || !participants.length) continue;
 
-      const dt = parseDateTime(spawnRaw);
+      const attendedRaw = attendedIdx >= 0 ? String(r[attendedIdx] ?? "").trim() : "";
+      const attendedDateParsed = parseDateTime(attendedRaw)?.date;
+
+      // 젠 시간 열이 날짜+시간인 경우와 시간만 적힌 경우를 모두 지원합니다.
+      // 시간만 있는 경우에는 참여 시간의 날짜를 보스 날짜로 사용합니다.
+      const parsedSpawn = parseDateTime(spawnRaw);
+      const spawnTimeOnly = parseTimeOnly(spawnRaw);
+      const dt = parsedSpawn
+        ? parsedSpawn
+        : (spawnTimeOnly && attendedDateParsed
+          ? { date: attendedDateParsed, time: spawnTimeOnly }
+          : null);
+
       if (!dt) {
         errors.push(`행 ${i + 1}: 젠 시간을 해석할 수 없습니다 (${spawnRaw})`);
         continue;
       }
 
-      const attendedRaw = attendedIdx >= 0 ? String(r[attendedIdx] ?? "").trim() : "";
-      const attendedDate = parseDateTime(attendedRaw)?.date || dt.date;
+      const attendedDate = attendedDateParsed || dt.date;
       const key = `${boss}|${dt.date}|${dt.time}`;
       const group = bossGroups.get(key) || {
         boss, spawnRaw, dt, participants: [], scoreValues: [], attendedDates: [],
