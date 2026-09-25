@@ -287,61 +287,58 @@ export async function GET() {
     // 대량 시트에서도 한 번의 거대한 upsert가 타임아웃을 일으키지 않도록
     // 250건 단위로 나눠 병렬 처리합니다.
     const attendanceRows = [...standaloneAttendance.values()];
+    // 출석 시트는 "현재 시트 전체"가 정답입니다.
+    // 이름 변경은 DB의 (이름, 날짜) 키만으로는 추적할 수 없으므로,
+    // 기존 google_sheet 출석과 현재 CSV의 키를 전체 비교하여
+    // 이름 변경/행 삭제로 시트에서 사라진 예전 기록을 제거합니다.
+    // 이 작업은 attendanceRows가 0건이어도 실행되어야 합니다.
+    const currentKeys = new Set(
+      attendanceRows.map(r => `${r.member_name}|${r.attendance_date}`)
+    );
+
     if (attendanceRows.length) {
       const chunks: typeof attendanceRows[] = [];
       for (let i = 0; i < attendanceRows.length; i += 250) chunks.push(attendanceRows.slice(i, i + 250));
 
-      // 이름이 변경된 경우에도 기존 google_sheet 출석 행이 남아 있지 않도록 합니다.
-      // 기존 코드는 (member_name, attendance_date)를 기준으로 upsert했기 때문에
-      // "홍길동" -> "김철수"처럼 이름을 바꾸면 김철수 행은 새로 생기고
-      // 홍길동의 예전 행은 그대로 남는 문제가 있었습니다.
-      // 먼저 현재 시트 데이터를 저장한 뒤, 같은 날짜의 google_sheet 출석 중
-      // 현재 시트에 존재하지 않는 이름은 오래된 행으로 보고 삭제합니다.
       const results = await Promise.all(
         chunks.map(chunk =>
           admin.from("attendance").upsert(chunk, { onConflict: "member_name,attendance_date" })
         )
       );
       const firstError = results.find(r => r.error)?.error;
-
       if (firstError) {
         errors.push(`출석 일괄 저장: ${firstError.message}`);
       } else {
         attendanceSynced = attendanceRows.length;
+      }
+    }
 
-        const attendanceDates = [...new Set(attendanceRows.map(r => r.attendance_date))];
-        const currentKeys = new Set(
-          attendanceRows.map(r => `${r.member_name}|${r.attendance_date}`)
+    // 날짜 범위를 제한하지 않고 모든 google_sheet 출석을 비교합니다.
+    // 예전 코드처럼 "현재 CSV에 있는 날짜만" 비교하면, 이름 변경/삭제된
+    // 행이 다른 날짜이거나 시트가 비어 있는 순간에는 오래된 이름이 남았습니다.
+    const { data: existingSheetAttendance, error: staleLookupError } = await admin
+      .from("attendance")
+      .select("id,member_name,attendance_date")
+      .eq("source", "google_sheet");
+
+    if (staleLookupError) {
+      errors.push(`기존 시트 출석 정리 조회: ${staleLookupError.message}`);
+    } else {
+      const staleIds = (existingSheetAttendance || [])
+        .filter(row => !currentKeys.has(`${row.member_name}|${row.attendance_date}`))
+        .map(row => row.id);
+
+      if (staleIds.length) {
+        const deleteResults = await Promise.all(
+          Array.from({ length: Math.ceil(staleIds.length / 250) }, (_, i) =>
+            admin
+              .from("attendance")
+              .delete()
+              .in("id", staleIds.slice(i * 250, (i + 1) * 250))
+          )
         );
-
-        // 같은 날짜의 google_sheet 출석 기록을 조회하여,
-        // 이름 변경/삭제로 시트에서 사라진 예전 행을 정리합니다.
-        const { data: existingSheetAttendance, error: staleLookupError } = await admin
-          .from("attendance")
-          .select("id,member_name,attendance_date")
-          .eq("source", "google_sheet")
-          .in("attendance_date", attendanceDates);
-
-        if (staleLookupError) {
-          errors.push(`기존 시트 출석 정리 조회: ${staleLookupError.message}`);
-        } else {
-          const staleIds = (existingSheetAttendance || [])
-            .filter(row => !currentKeys.has(`${row.member_name}|${row.attendance_date}`))
-            .map(row => row.id);
-
-          if (staleIds.length) {
-            const deleteResults = await Promise.all(
-              Array.from({ length: Math.ceil(staleIds.length / 250) }, (_, i) =>
-                admin
-                  .from("attendance")
-                  .delete()
-                  .in("id", staleIds.slice(i * 250, (i + 1) * 250))
-              )
-            );
-            const deleteError = deleteResults.find(r => r.error)?.error;
-            if (deleteError) errors.push(`이름 변경/삭제된 시트 출석 정리: ${deleteError.message}`);
-          }
-        }
+        const deleteError = deleteResults.find(r => r.error)?.error;
+        if (deleteError) errors.push(`이름 변경/삭제된 시트 출석 정리: ${deleteError.message}`);
       }
     }
 
