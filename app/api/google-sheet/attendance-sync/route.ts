@@ -270,41 +270,57 @@ export async function GET() {
 
       const existing = existingRecords || [];
       const duplicateIdsToDelete: string[] = [];
+      const usedExistingIds = new Set<string>();
+
+      // Google Sheets의 해당 날짜+보스 기록을 "원본 데이터"로 취급합니다.
+      // 특히 참여자 한 명의 오타를 수정했을 때 기존 DB 행을 그대로 업데이트해야
+      // 합니다. 예전 동기화에서 같은 날짜/보스에 여러 UUID가 생긴 경우도 여기서
+      // 하나로 합칩니다.
       const finalRows = bossRecords.map(row => {
         const same = existing.filter(r => r.date === row.date && r.boss === row.boss);
-        const exact = same.find(r => r.id === row.id);
-        if (exact) return row;
 
-        // 핵심: 예전 동기화에서 생성된 UUID를 사용한 기록이 있으면
-        // 날짜+보스+젠 시간이 같은 기존 기록을 반드시 재사용합니다.
-        // 이전 코드는 날짜+보스만 같고 기록이 2개 이상이면 새 행을 만들었고,
-        // 그 결과 사이트에 예전 참여자 명단이 남아 보이는 문제가 있었습니다.
-        const sameSpawn = same.filter(r => String(r.spawn_time || "") === row.spawn_time);
-        const legacy = sameSpawn[0] || (same.length === 1 ? same[0] : null);
-        if (legacy) {
-          for (const duplicate of same) {
-            if (duplicate.id !== legacy.id && String(duplicate.spawn_time || "") === row.spawn_time) {
-              duplicateIdsToDelete.push(duplicate.id);
-            }
-          }
-          return { ...row, id: legacy.id };
+        // 1순위: 현재 시트의 날짜+보스+젠시간과 정확히 같은 기존 행
+        let match = same.find(r => r.id === row.id && !usedExistingIds.has(r.id));
+        if (!match) {
+          match = same.find(r => String(r.spawn_time || "") === row.spawn_time && !usedExistingIds.has(r.id));
+        }
+        // 2순위: 과거 버전에서 만든 UUID/빈 젠시간 등으로 인해 exact match가
+        // 안 되더라도, 같은 날짜+보스의 기존 행을 재사용합니다.
+        if (!match) {
+          match = same.find(r => !usedExistingIds.has(r.id));
+        }
+
+        if (match) {
+          usedExistingIds.add(match.id);
+          return { ...row, id: match.id };
         }
         return row;
       });
+
+      // 같은 날짜+보스에 남아 있는 예전 중복 행은 모두 제거합니다.
+      // 이 처리를 해야 DB에 예전 participants=["뼈해장국", ...] 행이 남아
+      // 사이트가 그 값을 계속 보여주는 현상을 막을 수 있습니다.
+      for (const row of bossRecords) {
+        for (const old of existing) {
+          if (old.date === row.date && old.boss === row.boss && !usedExistingIds.has(old.id)) {
+            duplicateIdsToDelete.push(old.id);
+          }
+        }
+      }
+
+      // 중복 제거를 먼저 실행하고 새/수정 행을 저장합니다.
+      if (duplicateIdsToDelete.length) {
+        const { error: duplicateDeleteError } = await admin
+          .from("boss_records")
+          .delete()
+          .in("id", [...new Set(duplicateIdsToDelete)]);
+        if (duplicateDeleteError) errors.push(`예전 보스 기록 정리: ${duplicateDeleteError.message}`);
+      }
 
       const { error } = await admin.from("boss_records").upsert(finalRows, { onConflict: "id" });
       if (error) errors.push(`보스 기록 일괄 저장: ${error.message}`);
       else {
         synced = finalRows.length;
-        // 동일한 시트 기록이 과거 동기화 과정에서 중복 생성된 경우
-        // 오래된 복제 행을 제거해서 화면에 이전 참여자 명단이 남지 않게 합니다.
-        if (duplicateIdsToDelete.length) {
-          const { error: duplicateDeleteError } = await admin
-            .from("boss_records")
-            .delete()
-            .in("id", [...new Set(duplicateIdsToDelete)]);
-          if (duplicateDeleteError) errors.push(`중복 보스 기록 정리: ${duplicateDeleteError.message}`);
-        }
       }
     }
 
@@ -384,6 +400,11 @@ export async function GET() {
         boss: headers[bossIdx] ?? "",
         spawn: headers[spawnIdx] ?? "",
       },
+      // 배포 후 실제로 어떤 참여자 값이 Google Sheets CSV에서 읽혔는지
+      // 서버 응답으로 확인할 수 있도록 일부 미리보기를 제공합니다.
+      bossPreview: bossRecords.slice(0, 10).map(r => ({
+        date: r.date, boss: r.boss, spawn_time: r.spawn_time, participants: r.participants,
+      })),
       fetchedAt: new Date().toISOString(),
     }, {
       status: synced > 0 || attendanceSynced > 0 || rows.length <= 1 ? 200 : 500,
