@@ -264,22 +264,48 @@ export async function GET() {
       const dateList = [...new Set(bossRecords.map(r => r.date))];
       const { data: existingRecords, error: existingError } = await admin
         .from("boss_records")
-        .select("id,date,boss")
+        .select("id,date,boss,spawn_time,participants")
         .in("date", dateList);
       if (existingError) errors.push(`기존 보스 기록 조회: ${existingError.message}`);
 
       const existing = existingRecords || [];
+      const duplicateIdsToDelete: string[] = [];
       const finalRows = bossRecords.map(row => {
         const same = existing.filter(r => r.date === row.date && r.boss === row.boss);
         const exact = same.find(r => r.id === row.id);
         if (exact) return row;
-        if (same.length === 1) return { ...row, id: same[0].id };
+
+        // 핵심: 예전 동기화에서 생성된 UUID를 사용한 기록이 있으면
+        // 날짜+보스+젠 시간이 같은 기존 기록을 반드시 재사용합니다.
+        // 이전 코드는 날짜+보스만 같고 기록이 2개 이상이면 새 행을 만들었고,
+        // 그 결과 사이트에 예전 참여자 명단이 남아 보이는 문제가 있었습니다.
+        const sameSpawn = same.filter(r => String(r.spawn_time || "") === row.spawn_time);
+        const legacy = sameSpawn[0] || (same.length === 1 ? same[0] : null);
+        if (legacy) {
+          for (const duplicate of same) {
+            if (duplicate.id !== legacy.id && String(duplicate.spawn_time || "") === row.spawn_time) {
+              duplicateIdsToDelete.push(duplicate.id);
+            }
+          }
+          return { ...row, id: legacy.id };
+        }
         return row;
       });
 
       const { error } = await admin.from("boss_records").upsert(finalRows, { onConflict: "id" });
       if (error) errors.push(`보스 기록 일괄 저장: ${error.message}`);
-      else synced = finalRows.length;
+      else {
+        synced = finalRows.length;
+        // 동일한 시트 기록이 과거 동기화 과정에서 중복 생성된 경우
+        // 오래된 복제 행을 제거해서 화면에 이전 참여자 명단이 남지 않게 합니다.
+        if (duplicateIdsToDelete.length) {
+          const { error: duplicateDeleteError } = await admin
+            .from("boss_records")
+            .delete()
+            .in("id", [...new Set(duplicateIdsToDelete)]);
+          if (duplicateDeleteError) errors.push(`중복 보스 기록 정리: ${duplicateDeleteError.message}`);
+        }
+      }
     }
 
     // 출석은 보스 그룹과 별도로 수집한 값을 사용합니다.
