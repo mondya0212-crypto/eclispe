@@ -25,6 +25,7 @@ def post_attendance(member_name: str, user: discord.abc.User, status: str = "pre
         "discord_user_id": str(user.id),
         "discord_display_name": getattr(user, "display_name", user.name),
         "attendance_date": datetime.now().astimezone().strftime("%Y-%m-%d"),
+        "attendance_time": datetime.now().astimezone().strftime("%H:%M:%S"),
         "status": status,
     }).encode("utf-8")
     req = urllib.request.Request(API_URL, data=payload, method="POST", headers={

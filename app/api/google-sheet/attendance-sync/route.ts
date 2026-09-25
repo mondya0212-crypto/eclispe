@@ -4,6 +4,8 @@ import { createClient } from "@supabase/supabase-js";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
+export const fetchCache = "force-no-store";
+export const maxDuration = 30;
 
 const SHEET_ID = process.env.GOOGLE_SHEET_ID || "10TUvN2-5otNh22h8ABDT3bzek6anbUxeJhjodvBfQzE";
 // '출석 기록' 탭의 GID (봇이 사용하는 출석 기록 시트)
@@ -48,111 +50,56 @@ function findHeader(headers: string[], names: string[], tokens: string[] = []) {
   return normalized.findIndex(h => tokens.some(t => h.includes(normalizeHeader(t))));
 }
 
-function normalizeDateParts(y: string, mo: string, d: string, hhRaw: string, mmRaw = "00", ssRaw = "00", periodRaw = "") {
+function parseDateTime(value: string): { date: string; time: string } | null {
+  let v = value.trim();
+  if (!v) return null;
+
+  // Google Sheets can export the same date/time in several locale-dependent
+  // forms. Normalize separators and support ISO, Korean, slash-separated,
+  // and US-style month/day/year values.
+  v = v.replace(/[.\/]/g, "-").replace(/년|월/g, "-").replace(/일/g, " ").replace(/\s+/g, " ").trim();
+
+  let m = v.match(/(\d{4})-(\d{1,2})-(\d{1,2})\s*(오전|오후|AM|PM)?\s*(\d{1,2})(?::(\d{2}))?(?::(\d{2}))?/i);
+  if (!m) {
+    // e.g. 09-24-2026 11:05:48 PM
+    const us = v.match(/(\d{1,2})-(\d{1,2})-(\d{4})\s*(오전|오후|AM|PM)?\s*(\d{1,2})(?::(\d{2}))?(?::(\d{2}))?/i);
+    if (us) m = [us[0], us[3], us[1], us[2], us[4], us[5], us[6], us[7]] as RegExpMatchArray;
+  }
+  if (!m) return null;
+
+  const [, y, mo, d, periodRaw, hhRaw, mmRaw = "00", ssRaw = "00"] = m;
   let hh = Number(hhRaw);
-  const mm = Number(mmRaw);
-  const ss = Number(ssRaw);
   const period = String(periodRaw || "").toLowerCase();
   if ((period === "오후" || period === "pm") && hh < 12) hh += 12;
   if ((period === "오전" || period === "am") && hh === 12) hh = 0;
-  if (hh > 23 || hh < 0 || mm > 59 || mm < 0 || ss > 59 || ss < 0 || Number(mo) < 1 || Number(mo) > 12 || Number(d) < 1 || Number(d) > 31) return null;
+  if (hh > 23 || Number(mmRaw) > 59 || Number(ssRaw) > 59 || Number(mo) < 1 || Number(mo) > 12 || Number(d) < 1 || Number(d) > 31) return null;
+
   return {
-    date: `${y}-${String(mo).padStart(2, "0")}-${String(d).padStart(2, "0")}`,
-    time: `${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}:${String(ss).padStart(2, "0")}`,
+    date: `${y}-${mo.padStart(2, "0")}-${d.padStart(2, "0")}`,
+    time: `${String(hh).padStart(2, "0")}:${mmRaw.padStart(2, "0")}:${ssRaw.padStart(2, "0")}`,
   };
 }
 
-function parseGoogleSerial(value: string, fallbackDate?: string): { date: string; time: string } | null {
-  const v = String(value ?? "").trim();
-  if (!/^\d+(?:\.\d+)?$/.test(v)) return null;
-  const n = Number(v);
-  if (!Number.isFinite(n) || n < 0 || n > 100000) return null;
-
-  // Google Sheets/Excel 계열 날짜 serial: 1899-12-30 기준.
-  // 0~1 사이 값은 '시간만' 저장된 경우로 보고 fallbackDate를 사용합니다.
-  if (n < 1 && fallbackDate) {
-    const totalSeconds = Math.round(n * 86400) % 86400;
-    const hh = Math.floor(totalSeconds / 3600);
-    const mm = Math.floor((totalSeconds % 3600) / 60);
-    const ss = totalSeconds % 60;
-    return { date: fallbackDate, time: `${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}:${String(ss).padStart(2, "0")}` };
-  }
-
-  // 소수부가 없고 너무 작은 숫자면 날짜가 아닌 단순 숫자로 취급.
-  if (n < 1000) return null;
-  const epoch = new Date(Date.UTC(1899, 11, 30));
-  const ms = Math.round(n * 86400000);
-  const d = new Date(epoch.getTime() + ms);
-  if (Number.isNaN(d.getTime())) return null;
-  const date = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}-${String(d.getUTCDate()).padStart(2, "0")}`;
-  const time = `${String(d.getUTCHours()).padStart(2, "0")}:${String(d.getUTCMinutes()).padStart(2, "0")}:${String(d.getUTCSeconds()).padStart(2, "0")}`;
-  return { date, time };
-}
-
-function parseTimeParts(value: string): string | null {
-  let v = String(value ?? "").replace(/\u00a0/g, " ").replace(/\s+/g, " ").trim();
+function parseTimeOnly(value: string): string | null {
+  const v = value.trim();
   if (!v) return null;
-  v = v.replace(/^(?:시간\s*[:：]\s*)/i, "").trim();
-
-  // 지원: 21:10:30 / 21:10 / 오후 9:10:30 / 오후 9시 10분 30초 / 21시10분30초
-  let m = v.match(/^(오전|오후|AM|PM)?\s*(\d{1,2})\s*:\s*(\d{1,2})(?:\s*:\s*(\d{1,2}))?\s*(?:시)?$/i);
-  if (!m) m = v.match(/^(오전|오후|AM|PM)?\s*(\d{1,2})\s*시\s*(\d{1,2})\s*분(?:\s*(\d{1,2})\s*초)?$/i);
+  // Accept 23:05, 23:05:48, 11:05 PM and Korean 오전/오후 forms.
+  const m = v.match(/^(오전|오후|AM|PM)?\s*(\d{1,2})(?::(\d{2}))(?::(\d{2}))?\s*$/i);
   if (!m) return null;
-
-  const period = m[1] || "";
-  let hour = Number(m[2]);
-  const minute = Number(m[3]);
-  const second = Number(m[4] || "00");
-  const p = period.toLowerCase();
-  if ((p === "오후" || p === "pm") && hour < 12) hour += 12;
-  if ((p === "오전" || p === "am") && hour === 12) hour = 0;
-  if (hour > 23 || minute > 59 || second > 59) return null;
-  return `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}:${String(second).padStart(2, "0")}`;
+  const [, periodRaw, hhRaw, mmRaw, ssRaw = "00"] = m;
+  let hh = Number(hhRaw);
+  const period = String(periodRaw || "").toLowerCase();
+  if ((period === "오후" || period === "pm") && hh < 12) hh += 12;
+  if ((period === "오전" || period === "am") && hh === 12) hh = 0;
+  if (hh > 23 || Number(mmRaw) > 59 || Number(ssRaw) > 59) return null;
+  return `${String(hh).padStart(2, "0")}:${mmRaw}:${ssRaw}`;
 }
 
-function parseDateTime(value: string, fallbackDate?: string): { date: string; time: string } | null {
-  let v = String(value ?? "").replace(/\u00a0/g, " ").replace(/\s+/g, " ").trim();
-  if (!v) return null;
-
-  const serial = parseGoogleSerial(v, fallbackDate);
-  if (serial) return serial;
-
-  // YYYY-MM-DD / YYYY.MM.DD / YYYY년 M월 D일 + 시간
-  let m = v.match(/^(\d{4})\s*[.\-/년]\s*(\d{1,2})\s*[.\-/월]\s*(\d{1,2})\s*(?:일\s*)?(?:T|\s+|[, ]+)?(오전|오후|AM|PM)?\s*(\d{1,2})(?::|시)\s*(\d{1,2})(?:분)?(?:\s*(?::|분|초)\s*(\d{1,2})\s*초?)?/i);
-  if (m) return normalizeDateParts(m[1], m[2], m[3], m[5], m[6], m[7] || "00", m[4] || "");
-
-  // 위 형식에서 날짜 뒤 마침표가 하나 더 붙는 경우: 2026. 9. 24. 오후 9:10:30
-  m = v.match(/^(\d{4})\s*[.\-/]\s*(\d{1,2})\s*[.\-/]\s*(\d{1,2})\s*\.\s*(?:T|\s+)?(오전|오후|AM|PM)?\s*(\d{1,2})(?::|시)\s*(\d{1,2})(?:분)?(?:\s*(?::|분|초)\s*(\d{1,2})\s*초?)?/i);
-  if (m) return normalizeDateParts(m[1], m[2], m[3], m[5], m[6], m[7] || "00", m[4] || "");
-
-  // M/D/YYYY 또는 M-D-YYYY
-  m = v.match(/^(\d{1,2})\s*[\/\-.]\s*(\d{1,2})\s*[\/\-.]\s*(\d{4})\s*(?:T|\s+)?(오전|오후|AM|PM)?\s*(\d{1,2})(?::|시)\s*(\d{1,2})(?:분)?(?:\s*(?::|분|초)\s*(\d{1,2})\s*초?)?/i);
-  if (m) return normalizeDateParts(m[3], m[1], m[2], m[5], m[6], m[7] || "00", m[4] || "");
-
-  // Google Sheets가 내보내는 값에 요일/쉼표/문자 등이 섞여도
-  // 날짜와 시간 부분을 찾아냅니다.
-  const dateMatch = v.match(/(\d{4})\s*(?:[-\/.년]\s*)(\d{1,2})\s*(?:[-\/.월]\s*)(\d{1,2})/);
-  if (dateMatch) {
-    const timeMatch = v.match(/(오전|오후|AM|PM)?\s*(\d{1,2})\s*(?::|시)\s*(\d{1,2})(?:\s*분)?(?:\s*(?::|초)\s*(\d{1,2})\s*초?)?/i);
-    if (timeMatch) {
-      return normalizeDateParts(dateMatch[1], dateMatch[2], dateMatch[3], timeMatch[2], timeMatch[3], timeMatch[4] || "00", timeMatch[1] || "");
-    }
-  }
-
-  // 마지막 안전망: JS Date가 해석할 수 있는 일반적인 날짜 문자열
-  const jsDate = new Date(v);
-  if (!Number.isNaN(jsDate.getTime()) && /\d{4}/.test(v)) {
-    return {
-      date: `${jsDate.getFullYear()}-${String(jsDate.getMonth() + 1).padStart(2, "0")}-${String(jsDate.getDate()).padStart(2, "0")}`,
-      time: `${String(jsDate.getHours()).padStart(2, "0")}:${String(jsDate.getMinutes()).padStart(2, "0")}:${String(jsDate.getSeconds()).padStart(2, "0")}`,
-    };
-  }
-
-  return null;
-}
-
-function parseTimeOnly(value: string, fallbackDate?: string): string | null {
-  return parseTimeParts(value) || parseGoogleSerial(value, fallbackDate)?.time || null;
+function parseAttendanceTimestamp(value: string, fallbackDate: string): { date: string; time: string } | null {
+  const parsed = parseDateTime(value);
+  if (parsed) return parsed;
+  const time = parseTimeOnly(value);
+  return time ? { date: fallbackDate, time } : null;
 }
 
 function weekOfMonth(date: string) {
@@ -176,7 +123,7 @@ export async function GET() {
       return NextResponse.json({ ok: false, error: "SUPABASE_SERVICE_ROLE_KEY 환경변수가 없습니다." }, { status: 500 });
     }
 
-    const response = await fetch(CSV_URL, { cache: "no-store" });
+    const response = await fetch(`${CSV_URL}&_ts=${Date.now()}-${Math.random().toString(36).slice(2)}`, { cache: "no-store", next: { revalidate: 0 } });
     if (!response.ok) {
       return NextResponse.json({ ok: false, error: `Google Sheets 출석 기록 응답 오류: ${response.status}` }, { status: 502 });
     }
@@ -191,25 +138,34 @@ export async function GET() {
     const headers = rows[0];
     const participantsIdx = findHeader(headers, ["참여 닉네임", "참여자", "닉네임"], ["참여닉네임", "참여자"]);
     const attendedIdx = findHeader(headers, ["참여 시간", "출석 시간"], ["참여시간", "출석시간"]);
+    const dateIdx = findHeader(headers, ["날짜", "출석 날짜", "참여 날짜"], ["출석날짜", "참여날짜", "날짜"]);
     const bossIdx = findHeader(headers, ["보스명", "보스"], ["보스명"]);
     const scoreIdx = findHeader(headers, ["참여 점수", "점수"], ["참여점수"]);
     const spawnIdx = findHeader(headers, ["젠 시간", "젠시간"], ["젠시간"]);
 
-    if (participantsIdx < 0 || bossIdx < 0 || spawnIdx < 0) {
+    if (participantsIdx < 0) {
       return NextResponse.json({
         ok: false,
-        error: `출석 기록 시트 헤더를 찾지 못했습니다. 현재 헤더: ${headers.join(" / ")}`,
+        error: `출석 기록 시트에서 참여 닉네임 헤더를 찾지 못했습니다. 현재 헤더: ${headers.join(" / ")}`,
       }, { status: 400 });
     }
 
     const admin = createClient(url, key, { auth: { autoRefreshToken: false, persistSession: false } });
-    let synced = 0;
-    let attendanceSynced = 0;
     const errors: string[] = [];
 
-    // 출석 기록 시트는 보통 "한 행 = 한 참여자" 구조입니다.
-    // 같은 보스/젠 시간의 여러 행을 하나의 보스 기록으로 합쳐야
-    // 마지막 참여자만 남는 문제가 생기지 않습니다.
+    // 시트 행을 먼저 메모리에서 그룹화합니다. DB 요청은 아래에서 일괄 처리합니다.
+    // 출석은 보스 기록과 독립적으로 수집합니다.
+    // 시트에 출석 행만 있거나 보스/젠 시간 값이 비어 있어도 출석은 저장되어야 합니다.
+    const standaloneAttendance = new Map<string, {
+      member_name: string;
+      discord_user_id: string;
+      discord_display_name: string;
+      attendance_date: string;
+      status: string;
+      source: string;
+      attendance_time: string;
+    }>();
+
     const bossGroups = new Map<string, {
       boss: string;
       spawnRaw: string;
@@ -217,46 +173,62 @@ export async function GET() {
       participants: string[];
       scoreValues: number[];
       attendedDates: string[];
+      attendanceTimes: string[];
     }>();
 
     for (let i = 1; i < rows.length; i++) {
       const r = rows[i];
-      const boss = String(r[bossIdx] ?? "").trim();
-      const spawnRaw = String(r[spawnIdx] ?? "").trim();
+      const boss = bossIdx >= 0 ? String(r[bossIdx] ?? "").trim() : "";
+      const spawnRaw = spawnIdx >= 0 ? String(r[spawnIdx] ?? "").trim() : "";
       const participants = String(r[participantsIdx] ?? "")
-        .split(",")
-        .map(v => v.trim())
-        .filter(Boolean);
+        // Form/Sheet cells can contain comma, newline, slash or pipe separated names.
+        .split(/[,\n\r;|/、]+/)
+        .map(v => v.replace(/\s+/g, " ").trim())
+        .filter(Boolean)
+        .filter((name, idx, arr) => arr.indexOf(name) === idx);
+      const attendedRaw = attendedIdx >= 0 ? String(r[attendedIdx] ?? "").trim() : "";
+      const dateRaw = dateIdx >= 0 ? String(r[dateIdx] ?? "").trim() : "";
+      const dateParsed = parseDateTime(dateRaw);
+      const fallbackDate = dateParsed?.date || dateRaw.match(/\d{4}[-./]\d{1,2}[-./]\d{1,2}/)?.[0]?.replace(/\./g, "-").replace(/\//g, "-") || "";
+      const attendedParsed = parseAttendanceTimestamp(attendedRaw, fallbackDate);
+      const attendedDate = attendedParsed?.date || fallbackDate;
+      const attendanceTime = attendedParsed?.time || "";
+
+      // 출석 시트에 있는 출석은 보스 정보와 무관하게 먼저 보존합니다.
+      if (participants.length && attendedDate) {
+        for (const name of participants) {
+          const key = `${name}|${attendedDate}`;
+          const previous = standaloneAttendance.get(key);
+          if (!previous || (attendanceTime && !previous.attendance_time)) {
+            standaloneAttendance.set(key, {
+              member_name: name, discord_user_id: "", discord_display_name: name,
+              attendance_date: attendedDate, status: "present", source: "google_sheet",
+              attendance_time: attendanceTime,
+            });
+          }
+        }
+      }
+
+      // 보스 기록은 보스명/젠 시간이 있는 행에서만 처리합니다.
       if (!boss || !spawnRaw || !participants.length) continue;
 
-      const attendedRaw = attendedIdx >= 0 ? String(r[attendedIdx] ?? "").trim() : "";
-      const attendedDateParsed = parseDateTime(attendedRaw)?.date;
-
-      // 젠 시간 열이 날짜+시간인 경우와 시간만 적힌 경우를 모두 지원합니다.
-      // 시간만 있는 경우에는 참여 시간의 날짜를 보스 날짜로 사용합니다.
-      const parsedSpawn = parseDateTime(spawnRaw, attendedDateParsed);
-      const spawnTimeOnly = parseTimeOnly(spawnRaw, attendedDateParsed);
-      const dt = parsedSpawn
-        ? parsedSpawn
-        : (spawnTimeOnly && attendedDateParsed
-          ? { date: attendedDateParsed, time: spawnTimeOnly }
-          : null);
-
+      const dt = parseDateTime(spawnRaw);
       if (!dt) {
         errors.push(`행 ${i + 1}: 젠 시간을 해석할 수 없습니다 (${spawnRaw})`);
         continue;
       }
-
-      const attendedDate = attendedDateParsed || dt.date;
+      // Use the parsed datetime for the identity so formatting differences
+      // such as 2026. 9. 24 22:59:49 vs 2026-09-24 22:59:49 do not create
+      // a second boss record.
       const key = `${boss}|${dt.date}|${dt.time}`;
       const group = bossGroups.get(key) || {
-        boss, spawnRaw, dt, participants: [], scoreValues: [], attendedDates: [],
+        boss, spawnRaw, dt, participants: [], scoreValues: [], attendedDates: [], attendanceTimes: [],
       };
-
       for (const name of participants) {
         if (!group.participants.includes(name)) group.participants.push(name);
       }
-      if (attendedDate) group.attendedDates.push(attendedDate);
+      group.attendedDates.push(attendedDate);
+      if (attendanceTime) group.attendanceTimes.push(attendanceTime);
 
       const scoreRaw = scoreIdx >= 0 ? String(r[scoreIdx] ?? "").replace(/[,_\s]/g, "") : "";
       const rowScore = Number(scoreRaw);
@@ -264,97 +236,71 @@ export async function GET() {
       bossGroups.set(key, group);
     }
 
-    // 이번 동기화에서 Google Sheets가 실제로 가진 날짜/보스/젠 시간만 유지합니다.
-    // 과거에 잘못 저장된 같은 날짜/보스의 null/빈값/오래된 젠 시간 때문에
-    // 화면에 '-'가 남거나 실제 시트 기록이 가려지는 문제를 방지합니다.
-    const validKeysByDateBoss = new Map<string, Set<string>>();
-    for (const group of bossGroups.values()) {
-      const k = `${group.dt.date}|${group.boss}`;
-      const set = validKeysByDateBoss.get(k) || new Set<string>();
-      set.add(group.dt.time);
-      validKeysByDateBoss.set(k, set);
-    }
-
-    for (const [dateBoss, validTimes] of validKeysByDateBoss.entries()) {
-      const split = dateBoss.indexOf("|");
-      const date = dateBoss.slice(0, split);
-      const boss = dateBoss.slice(split + 1);
-      const { data: oldRecords, error: oldRecordsError } = await admin
-        .from("boss_records")
-        .select("id,spawn_time")
-        .eq("date", date)
-        .eq("boss", boss);
-      if (oldRecordsError) {
-        errors.push(`${boss} ${date}: 기존 기록 조회 실패: ${oldRecordsError.message}`);
-        continue;
-      }
-      const staleIds = (oldRecords || [])
-        .filter((r: { id: string; spawn_time?: string | null }) => {
-          const raw = String(r.spawn_time ?? "").trim();
-          if (!raw) return true;
-          // DB에 날짜+시간으로 저장된 정상 형식뿐 아니라, 혹시 기존 데이터가
-          // 다른 형식이어도 시간 부분만 비교할 수 있도록 파싱합니다.
-          const parsed = parseDateTime(raw, date);
-          const time = parsed?.time || parseTimeOnly(raw, date);
-          return !time || !validTimes.has(time);
-        })
-        .map((r: { id: string }) => r.id);
-      if (staleIds.length) {
-        const { error: deleteError } = await admin
-          .from("boss_records")
-          .delete()
-          .in("id", staleIds);
-        if (deleteError) errors.push(`${boss} ${date}: 오래된 젠 시간 기록 정리 실패: ${deleteError.message}`);
-      }
-    }
-
-    for (const group of bossGroups.values()) {
+    // 먼저 시트의 보스 기록을 모두 모읍니다.
+    // 기존 사이트 기록이 예전 random UUID로 저장되어 있더라도
+    // 같은 날짜+보스의 기존 기록을 찾아 갱신하여, 시트와 홈페이지가
+    // 서로 다른 참여자 명단을 동시에 갖는 문제를 방지합니다.
+    const bossRecords = [...bossGroups.values()].map((group) => {
       const { boss, spawnRaw, dt, participants } = group;
-      // 참여 점수가 행마다 반복되는 경우에는 중복 합산하지 않도록 최대값을 사용하고,
-      // 값이 없으면 참여 인원 수를 기본 점수로 사용합니다.
       const score = group.scoreValues.length ? Math.max(...group.scoreValues) : participants.length;
-      const id = deterministicUuid(`${boss}|${dt.date}|${dt.time}`);
-      const record = {
-        id,
+      return {
+        id: deterministicUuid(`${boss}|${dt.date}|${dt.time}`),
         week: weekOfMonth(dt.date),
         date: dt.date,
         boss,
         score,
         participants,
-        spawn_time: `${dt.date} ${dt.time}`,
+        spawn_time: dt.time,
       };
+    });
 
-      const { error } = await admin.from("boss_records").upsert(record, { onConflict: "id" });
-      if (error) {
-        errors.push(`${boss}: ${error.message}`);
-        continue;
-      }
-      synced++;
+    let synced = 0;
+    let attendanceSynced = 0;
+    if (bossRecords.length) {
+      // Existing records are loaded once per sync. If a matching deterministic
+      // record exists, update it. Otherwise, if there is exactly one legacy
+      // record for the same date+boss, update that row in place instead of
+      // creating a duplicate that can leave the UI showing stale participants.
+      const dateList = [...new Set(bossRecords.map(r => r.date))];
+      const { data: existingRecords, error: existingError } = await admin
+        .from("boss_records")
+        .select("id,date,boss")
+        .in("date", dateList);
+      if (existingError) errors.push(`기존 보스 기록 조회: ${existingError.message}`);
 
-      // 사이트의 'Discord 출석'도 시트에서 함께 채웁니다.
-      // 같은 사람이 같은 날짜에 여러 보스에 참여해도 출석은 1회로 유지합니다.
-      const attendedDates = [...new Set(group.attendedDates.length ? group.attendedDates : [dt.date])];
-      for (const name of participants) {
-        for (const attendedDate of attendedDates) {
-          const { error: attendanceError } = await admin.from("attendance").upsert({
-            member_name: name,
-            discord_user_id: "",
-            discord_display_name: name,
-            attendance_date: attendedDate,
-            status: "present",
-            source: "google_sheet",
-          }, { onConflict: "member_name,attendance_date" });
-          if (!attendanceError) attendanceSynced++;
-          else errors.push(`${name} ${attendedDate}: ${attendanceError.message}`);
-        }
-      }
+      const existing = existingRecords || [];
+      const finalRows = bossRecords.map(row => {
+        const same = existing.filter(r => r.date === row.date && r.boss === row.boss);
+        const exact = same.find(r => r.id === row.id);
+        if (exact) return row;
+        if (same.length === 1) return { ...row, id: same[0].id };
+        return row;
+      });
+
+      const { error } = await admin.from("boss_records").upsert(finalRows, { onConflict: "id" });
+      if (error) errors.push(`보스 기록 일괄 저장: ${error.message}`);
+      else synced = finalRows.length;
     }
 
-    // 보스 기록 자체가 정상 반영되었다면, 출석 테이블의 개별 오류 때문에
-    // 프론트가 새 보스 기록을 다시 읽지 못하는 일이 없도록 ok를 보스 동기화 기준으로 둡니다.
-    // 출석 오류는 errors에 그대로 남겨 운영자가 확인할 수 있습니다.
+    // 출석은 보스 그룹과 별도로 수집한 값을 사용합니다.
+    // 보스 행이 없는 순수 출석 행도 홈페이지에 반영됩니다.
+    // 대량 시트에서도 한 번의 거대한 upsert가 타임아웃을 일으키지 않도록
+    // 250건 단위로 나눠 병렬 처리합니다.
+    const attendanceRows = [...standaloneAttendance.values()];
+    if (attendanceRows.length) {
+      const chunks: typeof attendanceRows[] = [];
+      for (let i = 0; i < attendanceRows.length; i += 250) chunks.push(attendanceRows.slice(i, i + 250));
+      const results = await Promise.all(chunks.map(chunk => admin.from("attendance").upsert(chunk, { onConflict: "member_name,attendance_date" })));
+      const firstError = results.find(r => r.error)?.error;
+      if (firstError) errors.push(`출석 일괄 저장: ${firstError.message}`);
+      else attendanceSynced = attendanceRows.length;
+    }
+
     return NextResponse.json({
-      ok: synced >= 0,
+      // CSV를 정상적으로 읽고 하나라도 저장했다면 동기화 성공으로 봅니다.
+      // 일부 출석 upsert 오류가 있어도 보스 기록까지 실패한 것으로 취급하지 않습니다.
+      ok: synced > 0 || attendanceSynced > 0 || rows.length <= 1,
+      partial: errors.length > 0,
       synced,
       attendance: attendanceSynced,
       rows: rows.length - 1,
@@ -367,7 +313,10 @@ export async function GET() {
         spawn: headers[spawnIdx] ?? "",
       },
       fetchedAt: new Date().toISOString(),
-    }, { status: errors.length ? 207 : 200 });
+    }, {
+      status: synced > 0 || attendanceSynced > 0 || rows.length <= 1 ? 200 : 500,
+      headers: { "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate" },
+    });
   } catch (error) {
     return NextResponse.json({ ok: false, error: error instanceof Error ? error.message : "출석 기록 동기화 실패" }, { status: 500 });
   }
