@@ -103,3 +103,7 @@ Google Form → Sheet가 정상적으로 업데이트되기만 하면 됩니다.
 - `.gitignore`와 `vercel.json`을 포함했습니다.
 
 자세한 순서는 `DEPLOY_VERCEL.md`를 참고하세요.
+
+## 긴급 모드: 보스 참여 기록 Google Sheets 직접 연동
+
+Free Plan quota 제한으로 Supabase를 사용할 수 없는 경우에도 `보스 참여 기록` 화면을 사용할 수 있도록 `GET /api/google-sheet/boss-records`가 추가되었습니다. 현재 `출석 기록` 탭(GID `400265627`)의 A~F 열을 읽어 보스별로 그룹화하며, Supabase `boss_records`에는 쓰지 않습니다.

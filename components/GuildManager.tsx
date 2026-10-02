@@ -11,7 +11,7 @@ type Member = {
   id: string; name: string; job: string; power: number; defense?: number; accuracy?: number;
   created_at?: string; memo?: string | null;
 };
-type BossRecord = { id: string; week: number; date: string; boss: string; score: number; participants: string[]; spawn_time?: string | null };
+type BossRecord = { id: string; week: number; date: string; boss: string; score: number; participants: string[]; spawn_time?: string | null; total_count?: number; attendance_times?: string[]; source?: string };
 type DistributionRecord = { id: string; date: string; recipient: string; amount: number; reason: string; memo?: string | null };
 type AdminMemo = { id: string; title: string; content: string; created_at: string; updated_at: string };
 type Attendance = { id: string; member_name: string; discord_user_id?: string | null; discord_display_name?: string | null; attendance_date: string; attendance_time?: string | null; status: string; source: string; created_at: string };
@@ -41,6 +41,13 @@ function requireAdmin(): boolean {
 }
 
 const LOCAL_MEMBERS_KEY = "eclipse-members-local-v1";
+
+async function loadSheetBossRecords(): Promise<BossRecord[]> {
+  const response = await fetch(`/api/google-sheet/boss-records?_ts=${Date.now()}`, { cache: "no-store" });
+  const payload = await response.json();
+  if (!response.ok || !payload?.ok) throw new Error(payload?.error || `Google Sheets 보스 기록 로드 실패 (${response.status})`);
+  return Array.isArray(payload.records) ? payload.records as BossRecord[] : [];
+}
 
 async function loadLocalMembers(): Promise<Member[]> {
   try {
@@ -104,8 +111,8 @@ export default function GuildManager() {
     if (refreshInProgressRef.current) return;
     refreshInProgressRef.current = true;
     try {
-      const members = await loadLocalMembers();
-      setData(d => ({ ...d, members }));
+      const [members, records] = await Promise.all([loadLocalMembers(), loadSheetBossRecords()]);
+      setData(d => ({ ...d, members, records }));
     } finally {
       refreshInProgressRef.current = false;
     }
@@ -114,19 +121,20 @@ export default function GuildManager() {
   const load = async (_syncSheet = false) => {
     setLoading(true);
     try {
-      const members = await loadLocalMembers();
-      setData(d => ({ ...d, members }));
+      const [members, records] = await Promise.all([loadLocalMembers(), loadSheetBossRecords()]);
+      setData(d => ({ ...d, members, records }));
     } catch (error) {
-      window.alert(error instanceof Error ? error.message : "길드원 백업 데이터를 불러오지 못했습니다.");
+      window.alert(error instanceof Error ? error.message : "Google Sheets 데이터를 불러오지 못했습니다.");
     } finally {
       setLoading(false);
     }
   };
 
   useEffect(() => {
-    // 긴급 무-Supabase 모드: 현재 백업된 members JSON만 로드합니다.
-    // Supabase quota 제한과 무관하게 길드원/메모/사다리 화면을 사용할 수 있습니다.
-    void refreshDataSilently().finally(() => setLoading(false));
+    // 긴급 무-Supabase 모드: 길드원은 백업 JSON, 보스 기록은 Google Sheets를 원본으로 사용합니다.
+    void refreshDataSilently().catch(error => {
+      window.alert(error instanceof Error ? error.message : "Google Sheets 데이터를 불러오지 못했습니다.");
+    }).finally(() => setLoading(false));
   }, []);
 
   const title = menus.find(m => m.key === active)?.label || "대시보드";
@@ -145,7 +153,7 @@ export default function GuildManager() {
       <header className="topbar">
         <button className="icon-btn menu-toggle" onClick={() => setSidebar(!sidebar)}><Menu size={20} /></button>
         <div><div className="crumb">ECLIPSE GUILD / {title}</div><h1>{title}</h1></div>
-        <div style={{display:"flex",gap:8,alignItems:"center"}}><span className="eyebrow-badge" title="Supabase 없이 members 백업을 사용합니다.">긴급 백업 모드</span><button className="refresh" onClick={() => void load(false)} title="길드원 백업 새로고침"><RefreshCw size={16} /></button></div>
+        <div style={{display:"flex",gap:8,alignItems:"center"}}><span className="eyebrow-badge" title="길드원은 백업 JSON, 보스 참여 기록은 Google Sheets를 사용합니다.">시트 연동 모드</span><button className="refresh" onClick={() => void load(true)} title="Google Sheets 동기화"><RefreshCw size={16} /></button></div>
       </header>
       <section className="content">
         {loading ? <div className="loading-page"><div className="loading-dot" /> 데이터를 불러오는 중...</div> : <>
@@ -323,20 +331,24 @@ function Members({ data, setData }: { data: AppData; setData: React.Dispatch<Rea
   </div>;
 }
 
-function BossRecords({ data, setData }: { data: AppData; setData: React.Dispatch<React.SetStateAction<AppData>> }) {
-  const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
-  const [boss, setBoss] = useState(""); const [score, setScore] = useState(""); const [selected, setSelected] = useState<string[]>([]); const [editing, setEditing] = useState<BossRecord | null>(null); const [saving, setSaving] = useState(false);
-  const resetEdit = () => { setEditing(null); setDate(new Date().toISOString().slice(0, 10)); setBoss(""); setScore(""); setSelected([]); };
-  const add = async () => { if (!boss.trim()) return window.alert("보스명을 입력해주세요."); setSaving(true); const { data: record, error } = await supabase.from("boss_records").insert({ date, boss: boss.trim(), score: Number(score) || 0, participants: selected }).select().single(); setSaving(false); if (error) return window.alert(error.message); setData(d => ({ ...d, records: [record as BossRecord, ...d.records] })); setBoss(""); setScore(""); setSelected([]); };
-  const startEdit = (r: BossRecord) => { if (!requireAdmin()) return; setEditing(r); setDate(r.date); setBoss(r.boss); setScore(String(r.score)); setSelected(r.participants || []); };
-  const saveEdit = async () => { if (!editing) return; if (!boss.trim()) return window.alert("보스명을 입력해주세요."); setSaving(true); const { data: record, error } = await supabase.from("boss_records").update({ date, boss: boss.trim(), score: Number(score) || 0, participants: selected }).eq("id", editing.id).select().single(); setSaving(false); if (error) return window.alert(`수정 실패: ${error.message}`); setData(d => ({ ...d, records: d.records.map(r => r.id === editing.id ? record as BossRecord : r) })); resetEdit(); };
-  const del = async (id: string) => { if (!requireAdmin()) return; if (!window.confirm("이 기록을 삭제할까요?")) return; const { error } = await supabase.from("boss_records").delete().eq("id", id); if (error) return window.alert(`삭제 실패: ${error.message}`); setData(d => ({ ...d, records: d.records.filter(r => r.id !== id) })); };
-  const resetAll = async () => { if (!requireAdmin()) return; if (!window.confirm("모든 보스 참여 기록을 정말 초기화할까요?")) return; const { error } = await supabase.from("boss_records").delete().not("id", "is", null); if (error) return window.alert(error.message); setData(d => ({ ...d, records: [] })); };
-  const toggle = (name: string) => setSelected(s => s.includes(name) ? s.filter(x => x !== name) : [...s, name]);
-  return <div className="stack"><PageIntro title="⚔️ 보스 참여 기록" desc="보스별 참여자를 저장하고 수정할 수 있습니다." />
-    <div className="panel"><div className="panel-title"><span>➕ 참여 기록 추가</span><button className="danger-outline small" onClick={resetAll}><Lock size={13} /> 전체 초기화</button></div><div className="form-grid boss-form"><input type="date" value={date} onChange={e => setDate(e.target.value)} /><input placeholder="보스 이름" value={boss} onChange={e => setBoss(e.target.value)} /><input type="number" placeholder="보스 점수" value={score} onChange={e => setScore(e.target.value)} /></div><div className="member-picker">{data.members.map(m => <button key={m.id} className={selected.includes(m.name) ? "selected" : ""} onClick={() => toggle(m.name)}>{m.name}</button>)}</div><button className="primary" disabled={saving} onClick={add}><Plus size={16} /> {saving ? "저장 중..." : `참여 기록 저장 (${selected.length}명)`}</button></div>
-    <div className="panel table-panel"><div className="table-wrap"><table className="boss-table"><thead><tr><th>날짜</th><th>젠 시간</th><th>보스</th><th>점수</th><th>참여자</th><th>관리</th></tr></thead><tbody>{data.records.map(r => <tr key={r.id}><td>{r.date}</td><td>{r.spawn_time || "-"}</td><td className="strong">{r.boss}</td><td>{formatNumber(r.score)}</td><td>{r.participants?.length ? r.participants.join(", ") : "-"}</td><td><div className="actions"><button title="수정" onClick={() => startEdit(r)}><Pencil size={14} /></button><button title="삭제" className="danger" onClick={() => del(r.id)}><Trash2 size={14} /></button></div></td></tr>)}</tbody></table></div>{!data.records.length && <Empty text="등록된 기록이 없습니다." />}</div>
-    {editing && <div className="modal-backdrop" onMouseDown={e => { if (e.target === e.currentTarget) resetEdit(); }}><div className="member-edit-modal boss-edit-modal"><div className="modal-head"><div><div className="eyebrow">ECLIPSE BOSS RECORD</div><h3>✏️ 보스 참여 기록 수정</h3></div><button className="icon-btn" onClick={resetEdit}><X size={20} /></button></div><div className="edit-grid"><label>날짜<input type="date" value={date} onChange={e => setDate(e.target.value)} /></label><label>보스 이름<input value={boss} onChange={e => setBoss(e.target.value)} /></label><label>보스 점수<input type="number" value={score} onChange={e => setScore(e.target.value)} /></label></div><div className="boss-edit-participants"><span>참여자</span><div className="member-picker">{data.members.map(m => <button key={m.id} className={selected.includes(m.name) ? "selected" : ""} onClick={() => toggle(m.name)}>{m.name}</button>)}</div></div><div className="modal-actions"><button className="secondary" onClick={resetEdit}>취소</button><button className="primary" disabled={saving} onClick={saveEdit}>{saving ? "저장 중..." : "수정 저장"}</button></div></div></div>}
+function BossRecords({ data }: { data: AppData; setData: React.Dispatch<React.SetStateAction<AppData>> }) {
+  const [selectedDate, setSelectedDate] = useState("");
+  const records = useMemo(() => sortBossRecords(data.records).filter(r => !selectedDate || r.date === selectedDate), [data.records, selectedDate]);
+  const dates = useMemo(() => [...new Set(sortBossRecords(data.records).map(r => r.date))], [data.records]);
+  return <div className="stack">
+    <PageIntro title="⚔️ 보스 참여 기록" desc="Google Sheets의 출석 기록을 원본으로 사용합니다. 시트에서 수정한 뒤 오른쪽 위 새로고침 버튼을 누르면 반영됩니다." badge="GOOGLE SHEETS" />
+    <div className="panel">
+      <div className="panel-title"><span>📊 시트 연동 현황</span><span className="muted">총 {data.records.length}건</span></div>
+      <div className="form-grid boss-form">
+        <select value={selectedDate} onChange={e => setSelectedDate(e.target.value)}>
+          <option value="">전체 날짜</option>
+          {dates.map(date => <option key={date} value={date}>{date}</option>)}
+        </select>
+        <div className="panel-note">참여자: A열 · 참여시간: B열 · 보스명: C열 · 총인원: D열 · 참여점수: E열 · 젠시간: F열</div>
+      </div>
+    </div>
+    <div className="panel table-panel"><div className="table-wrap"><table className="boss-table"><thead><tr><th>날짜</th><th>젠 시간</th><th>보스</th><th>총인원</th><th>점수</th><th>참여자</th></tr></thead><tbody>{records.map(r => <tr key={r.id}><td>{r.date}</td><td>{r.spawn_time || "-"}</td><td className="strong">{r.boss}</td><td>{r.total_count ?? r.participants.length}명</td><td>{formatNumber(r.score)}</td><td>{r.participants?.length ? r.participants.join(", ") : "-"}</td></tr>)}</tbody></table></div>{!records.length && <Empty text="Google Sheets에서 보스 참여 기록을 찾지 못했습니다." />}</div>
+    <div className="panel"><div className="panel-title"><span>💡 사용 방법</span></div><p className="muted">Google Sheets의 ‘출석 기록’ 탭을 수정한 다음 오른쪽 위의 ↻ 버튼을 누르세요. 이 화면은 Supabase에 보스 기록을 저장하지 않으므로 Realtime 메시지/DB 저장량을 발생시키지 않습니다.</p></div>
   </div>;
 }
 
