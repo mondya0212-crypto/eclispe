@@ -1,11 +1,11 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { supabase } from "../lib/supabase";
 import {
   CalendarDays, ChevronDown, Dices, LayoutDashboard, Lock, Menu, Pencil, Plus,
-  RefreshCw, Search, Swords, Trash2, Trophy, Users, Wallet, X, FileSpreadsheet,
+  RefreshCw, Search, Swords, Trash2, Trophy, Users, Wallet, X,
 } from "lucide-react";
-import { supabase } from "../lib/supabase";
 
 type Member = {
   id: string; name: string; job: string; power: number; defense?: number; accuracy?: number;
@@ -38,6 +38,27 @@ function requireAdmin(): boolean {
     return false;
   }
   return true;
+}
+
+const LOCAL_MEMBERS_KEY = "eclipse-members-local-v1";
+
+async function loadLocalMembers(): Promise<Member[]> {
+  try {
+    const saved = window.localStorage.getItem(LOCAL_MEMBERS_KEY);
+    if (saved) {
+      const parsed = JSON.parse(saved);
+      if (Array.isArray(parsed)) return parsed as Member[];
+    }
+  } catch {}
+  const response = await fetch("/data/members.json", { cache: "no-store" });
+  if (!response.ok) throw new Error(`members.json 로드 실패 (${response.status})`);
+  const members = await response.json();
+  if (!Array.isArray(members)) throw new Error("members.json 형식이 올바르지 않습니다.");
+  return members as Member[];
+}
+
+function saveLocalMembers(members: Member[]) {
+  window.localStorage.setItem(LOCAL_MEMBERS_KEY, JSON.stringify(members));
 }
 
 function formatNumber(value: number) { return Number(value || 0).toLocaleString("ko-KR"); }
@@ -83,81 +104,29 @@ export default function GuildManager() {
     if (refreshInProgressRef.current) return;
     refreshInProgressRef.current = true;
     try {
-    const [membersResult, recordsResult, distributionsResult, memosResult, attendanceResult] = await Promise.all([
-      supabase.from("members").select("*").order("name"),
-      supabase.from("boss_records").select("*").order("date", { ascending: false }),
-      supabase.from("distribution_records").select("*").order("date", { ascending: false }),
-      supabase.from("admin_memos").select("*").order("created_at", { ascending: false }),
-      supabase.from("attendance").select("*").order("attendance_date", { ascending: false }),
-    ]);
-
-    // 백그라운드 갱신에서는 loading=true를 절대 건드리지 않습니다.
-    // 현재 화면은 그대로 두고, 데이터만 교체합니다.
-    setData({
-      members: (membersResult.data || []) as Member[],
-      records: sortBossRecords((recordsResult.data || []) as BossRecord[]),
-      distributions: (distributionsResult.data || []) as DistributionRecord[],
-      memos: (memosResult.data || []) as AdminMemo[],
-      attendance: (attendanceResult.data || []) as Attendance[],
-    });
+      const members = await loadLocalMembers();
+      setData(d => ({ ...d, members }));
     } finally {
       refreshInProgressRef.current = false;
     }
   };
 
-  const load = async (syncSheet = false) => {
+  const load = async (_syncSheet = false) => {
     setLoading(true);
-    // 수동 시트 동기화는 길드원 정보 + 출석/보스 기록을 한 번에 반영합니다.
-    if (syncSheet) {
-      try {
-        const [memberResponse, attendanceResponse] = await Promise.all([
-          fetch(`/api/google-sheet/sync?_ts=${Date.now()}`, { cache: "no-store" }),
-          fetch(`/api/google-sheet/attendance-sync?_ts=${Date.now()}`, { cache: "no-store" }),
-        ]);
-        const memberResult = await memberResponse.json().catch(() => null);
-        const attendanceResult = await attendanceResponse.json().catch(() => null);
-        if (!memberResponse.ok || !memberResult?.ok) {
-          window.alert(`❌ Google Sheets 길드원 동기화 실패\n\n${memberResult?.error || `서버 오류 (${memberResponse.status})`}`);
-        } else if (!attendanceResponse.ok || !attendanceResult?.ok) {
-          window.alert(`⚠️ 길드원 동기화는 완료됐지만 출석 기록 동기화에 문제가 있습니다.\n\n길드원: ${memberResult.synced ?? 0}명\n출석/보스 오류: ${attendanceResult?.error || `서버 오류 (${attendanceResponse.status})`}`);
-        } else {
-          window.alert(`✅ Google Sheets 전체 동기화 완료\n\n길드원: ${memberResult.synced ?? 0}명\n보스 출석 기록: ${attendanceResult.synced ?? 0}건\n출석 반영: ${attendanceResult.attendance ?? 0}건\n\n직업 열: ${memberResult.columns?.job || "찾지 못함"}`);
-        }
-      } catch (error) {
-        window.alert(`❌ Google Sheets 연동 실패\n\n${error instanceof Error ? error.message : "네트워크 오류"}`);
-      }
+    try {
+      const members = await loadLocalMembers();
+      setData(d => ({ ...d, members }));
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : "길드원 백업 데이터를 불러오지 못했습니다.");
+    } finally {
+      setLoading(false);
     }
-    const [{ data: members, error: membersError }, { data: records, error: recordsError }, { data: distributions, error: distributionError }, { data: memos, error: memosError }, { data: attendance, error: attendanceError }] = await Promise.all([
-      supabase.from("members").select("*").order("name"),
-      supabase.from("boss_records").select("*").order("date", { ascending: false }),
-      supabase.from("distribution_records").select("*").order("date", { ascending: false }),
-      supabase.from("admin_memos").select("*").order("created_at", { ascending: false }),
-      supabase.from("attendance").select("*").order("attendance_date", { ascending: false }),
-    ]);
-    if (membersError || recordsError || distributionError || memosError || attendanceError) {
-      window.alert(membersError?.message || recordsError?.message || distributionError?.message || memosError?.message || attendanceError?.message || "데이터를 불러오지 못했습니다.");
-    }
-    setData({
-      members: (members || []) as Member[],
-      records: sortBossRecords((records || []) as BossRecord[]),
-      distributions: (distributions || []) as DistributionRecord[],
-      memos: (memos || []) as AdminMemo[],
-      attendance: (attendance || []) as Attendance[],
-    });
-    setLoading(false);
   };
 
   useEffect(() => {
-    // 최초 접속 시에는 Supabase에 이미 저장된 데이터만 읽습니다.
-    // Google Sheets 자동 폴링과 Supabase Realtime 구독을 제거해
-    // egress / realtime message 사용량이 폭증하지 않도록 합니다.
-    // 최신 시트 반영이 필요할 때는 상단의 "시트 동기화" 버튼을 눌러주세요.
-    let mounted = true;
-    void (async () => {
-      await refreshDataSilently();
-      if (mounted) setLoading(false);
-    })();
-    return () => { mounted = false; };
+    // 긴급 무-Supabase 모드: 현재 백업된 members JSON만 로드합니다.
+    // Supabase quota 제한과 무관하게 길드원/메모/사다리 화면을 사용할 수 있습니다.
+    void refreshDataSilently().finally(() => setLoading(false));
   }, []);
 
   const title = menus.find(m => m.key === active)?.label || "대시보드";
@@ -176,7 +145,7 @@ export default function GuildManager() {
       <header className="topbar">
         <button className="icon-btn menu-toggle" onClick={() => setSidebar(!sidebar)}><Menu size={20} /></button>
         <div><div className="crumb">ECLIPSE GUILD / {title}</div><h1>{title}</h1></div>
-        <div style={{display:"flex",gap:8,alignItems:"center"}}><button className="secondary" onClick={() => void load(true)} title="Google Sheets 전체 동기화"><FileSpreadsheet size={15} /> 시트 동기화</button><button className="refresh" onClick={() => void load(false)} title="데이터 새로고침"><RefreshCw size={16} /></button></div>
+        <div style={{display:"flex",gap:8,alignItems:"center"}}><span className="eyebrow-badge" title="Supabase 없이 members 백업을 사용합니다.">긴급 백업 모드</span><button className="refresh" onClick={() => void load(false)} title="길드원 백업 새로고침"><RefreshCw size={16} /></button></div>
       </header>
       <section className="content">
         {loading ? <div className="loading-page"><div className="loading-dot" /> 데이터를 불러오는 중...</div> : <>
@@ -245,10 +214,11 @@ function Members({ data, setData }: { data: AppData; setData: React.Dispatch<Rea
     if (!form.name.trim()) return window.alert("닉네임을 입력해주세요.");
     setSaving(true);
     const row = { name: form.name.trim(), job: form.job.trim(), power: Number(form.power) || 0, memo: form.memo.trim() };
-    const result = await supabase.from("members").insert(row).select().single();
+    const newMember: Member = { id: crypto.randomUUID(), ...row, created_at: new Date().toISOString() };
+    const next = [...data.members, newMember];
+    saveLocalMembers(next);
+    setData(d => ({ ...d, members: next }));
     setSaving(false);
-    if (result.error) return window.alert(`등록 실패: ${result.error.message}`);
-    setData(d => ({ ...d, members: [...d.members, result.data as Member] }));
     reset();
   };
 
@@ -271,10 +241,10 @@ function Members({ data, setData }: { data: AppData; setData: React.Dispatch<Rea
 
   const saveMemberMemo = async (m: Member) => {
     setMemoSaving(true);
-    const result = await supabase.from("members").update({ memo: memoDraft.trim() }).eq("id", m.id).select().single();
+    const next = data.members.map(member => member.id === m.id ? { ...member, memo: memoDraft.trim() } : member);
+    saveLocalMembers(next);
+    setData(d => ({ ...d, members: next }));
     setMemoSaving(false);
-    if (result.error) return window.alert(`메모 저장 실패: ${result.error.message}`);
-    setData(d => ({ ...d, members: d.members.map(member => member.id === m.id ? result.data as Member : member) }));
     cancelMemoEdit();
   };
 
@@ -284,10 +254,10 @@ function Members({ data, setData }: { data: AppData; setData: React.Dispatch<Rea
     if (!requireAdmin()) return;
     setSaving(true);
     const row = { name: form.name.trim(), job: form.job.trim(), power: Number(form.power) || 0, memo: form.memo.trim() };
-    const result = await supabase.from("members").update(row).eq("id", editing.id).select().single();
+    const next = data.members.map(m => m.id === editing.id ? { ...m, ...row } : m);
+    saveLocalMembers(next);
+    setData(d => ({ ...d, members: next }));
     setSaving(false);
-    if (result.error) return window.alert(`수정 실패: ${result.error.message}`);
-    setData(d => ({ ...d, members: d.members.map(m => m.id === editing.id ? result.data as Member : m) }));
     reset();
   };
 
@@ -295,13 +265,13 @@ function Members({ data, setData }: { data: AppData; setData: React.Dispatch<Rea
     if (!requireAdmin()) return;
     const member = data.members.find(m => m.id === id); if (!member) return;
     if (!window.confirm(`"${member.name}" 길드원을 삭제할까요?`)) return;
-    const { error } = await supabase.from("members").delete().eq("id", id);
-    if (error) return window.alert(`삭제 실패: ${error.message}`);
-    setData(d => ({ ...d, members: d.members.filter(m => m.id !== id), records: d.records.map(r => ({ ...r, participants: (r.participants || []).filter(n => n !== member.name) })) }));
+    const next = data.members.filter(m => m.id !== id);
+    saveLocalMembers(next);
+    setData(d => ({ ...d, members: next, records: d.records.map(r => ({ ...r, participants: (r.participants || []).filter(n => n !== member.name) })) }));
   };
 
   return <div className="stack">
-    <PageIntro title="👥 길드원 목록" desc="길드원 정보를 카드형 UI로 확인하고 투력 기준으로 정렬할 수 있습니다." />
+    <PageIntro title="👥 길드원 목록" desc="Supabase 없이 백업 JSON을 사용합니다. 메모/길드원 수정은 현재 사용 중인 브라우저에 임시 저장됩니다." badge="OFFLINE BACKUP" />
     <div className="panel add-member-panel">
       <div className="panel-title"><span>➕ 길드원 등록 <small className="free-register-badge">비밀번호 없이 등록 가능</small></span></div>
       <div className="form-grid member-add-grid">
