@@ -49,7 +49,23 @@ async function loadSheetBossRecords(): Promise<BossRecord[]> {
   return Array.isArray(payload.records) ? payload.records as BossRecord[] : [];
 }
 
+async function loadSheetMembers(): Promise<Member[]> {
+  const response = await fetch(`/api/google-sheet/sync?_ts=${Date.now()}`, {
+    cache: "no-store",
+    headers: { "Cache-Control": "no-cache" },
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok || !payload?.ok) {
+    throw new Error(payload?.error || `Google Sheets 길드원 동기화 실패 (${response.status})`);
+  }
+  const members = Array.isArray(payload.members) ? payload.members : [];
+  // 마지막 정상 응답을 로컬에도 보관해 두어 일시적인 시트 오류 때 화면을 복구할 수 있습니다.
+  saveLocalMembers(members as Member[]);
+  return members as Member[];
+}
+
 async function loadLocalMembers(): Promise<Member[]> {
+  // 기존 긴급 백업 모드는 유지하되, 정상적으로는 Google Sheets를 원본으로 사용합니다.
   try {
     const saved = window.localStorage.getItem(LOCAL_MEMBERS_KEY);
     if (saved) {
@@ -111,7 +127,7 @@ export default function GuildManager() {
     if (refreshInProgressRef.current) return;
     refreshInProgressRef.current = true;
     try {
-      const [members, records] = await Promise.all([loadLocalMembers(), loadSheetBossRecords()]);
+      const [members, records] = await Promise.all([loadSheetMembers(), loadSheetBossRecords()]);
       setData(d => ({ ...d, members, records }));
     } finally {
       refreshInProgressRef.current = false;
@@ -121,7 +137,7 @@ export default function GuildManager() {
   const load = async (_syncSheet = false) => {
     setLoading(true);
     try {
-      const [members, records] = await Promise.all([loadLocalMembers(), loadSheetBossRecords()]);
+      const [members, records] = await Promise.all([loadSheetMembers(), loadSheetBossRecords()]);
       setData(d => ({ ...d, members, records }));
     } catch (error) {
       window.alert(error instanceof Error ? error.message : "Google Sheets 데이터를 불러오지 못했습니다.");
