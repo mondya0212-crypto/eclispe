@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { createHash } from "crypto";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -77,14 +78,22 @@ export async function GET() {
       return NextResponse.json({ ok: false, error: `시트 헤더를 찾지 못했습니다. 현재 헤더: ${headers.join(" / ")}` }, { status: 400 });
     }
 
-    const members = rows.slice(1).map((r, i) => {
-      const name = String(r[nameIdx] ?? "").trim();
+    // Google Form 응답은 같은 닉네임이 여러 번 들어올 수 있습니다.
+    // 홈페이지에서는 닉네임을 고유 키로 보고 마지막 응답만 남깁니다.
+    const memberMap = new Map<string, { id: string; name: string; job: string; power: number; memo: string; row: number }>();
+    rows.slice(1).forEach((r, i) => {
+      const name = String(r[nameIdx] ?? "").trim().replace(/\s+/g, " ");
+      if (!name) return;
       const job = jobIdx >= 0 ? String(r[jobIdx] ?? "").trim() : "";
       const powerText = powerIdx >= 0 ? String(r[powerIdx] ?? "").replace(/[,_\s]/g, "") : "0";
       const power = Number(powerText) || 0;
       const memo = memoIdx >= 0 ? String(r[memoIdx] ?? "").trim() : "";
-      return { name, job, power, memo, row: i + 2 };
-    }).filter(m => m.name);
+      const normalizedName = name.toLocaleLowerCase("ko-KR");
+      const id = `sheet-${createHash("sha1").update(`eclipse-member:${normalizedName}`).digest("hex").slice(0, 16)}`;
+      // 같은 닉네임이 다시 제출되면 마지막 행을 사용합니다.
+      memberMap.set(normalizedName, { id, name, job, power, memo, row: i + 2 });
+    });
+    const members = [...memberMap.values()];
 
     // 길드원은 Google Sheets를 원본으로 사용합니다. Supabase에는 저장하지 않습니다.
     const synced = members.length;

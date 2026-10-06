@@ -73,10 +73,40 @@ async function loadSheetMembers(): Promise<Member[]> {
   if (!response.ok || !payload?.ok) {
     throw new Error(payload?.error || `Google Sheets 길드원 동기화 실패 (${response.status})`);
   }
-  const members = Array.isArray(payload.members) ? payload.members : [];
-  // 마지막 정상 응답을 로컬에도 보관해 두어 일시적인 시트 오류 때 화면을 복구할 수 있습니다.
-  saveLocalMembers(members as Member[]);
-  return members as Member[];
+  const rawMembers = Array.isArray(payload.members) ? payload.members as Member[] : [];
+  // API에서도 중복 제거하지만, 오래된 배포본/API 응답이 섞여도 화면에서는 중복을 막습니다.
+  const memberMap = new Map<string, Member>();
+  for (const member of rawMembers) {
+    const name = String(member.name || "").trim().replace(/\s+/g, " ");
+    if (!name) continue;
+    const key = name.toLocaleLowerCase("ko-KR");
+    memberMap.set(key, { ...member, name, id: member.id || `sheet-${encodeURIComponent(key)}` });
+  }
+  const sheetMembers = [...memberMap.values()];
+
+  // Google Form/Sheet가 원본이어도, 홈페이지에서 기존에 작성해 둔
+  // 길드원 메모는 닉네임 기준으로 반드시 유지합니다.
+  // 시트에 메모 열이 비어 있으면 기존 브라우저 메모를 우선 사용합니다.
+  const existing = loadLocalJson<Member[]>(LOCAL_MEMBERS_KEY, []);
+  const existingByName = new Map<string, Member>();
+  for (const member of existing) {
+    const name = String(member.name || "").trim().replace(/\s+/g, " ");
+    if (!name) continue;
+    existingByName.set(name.toLocaleLowerCase("ko-KR"), member);
+  }
+
+  const members = sheetMembers.map((member) => {
+    const old = existingByName.get(member.name.toLocaleLowerCase("ko-KR"));
+    return {
+      ...member,
+      // 시트에 실제 메모가 있으면 그 값을 사용하고, 없으면 기존 홈페이지 메모를 유지
+      memo: String(member.memo || "").trim() || old?.memo || "",
+    };
+  });
+
+  // 마지막 정상 응답을 로컬에도 보관해 두어 다음 동기화에서도 기존 메모를 유지합니다.
+  saveLocalMembers(members);
+  return members;
 }
 
 async function loadLocalMembers(): Promise<Member[]> {
