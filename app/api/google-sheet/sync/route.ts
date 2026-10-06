@@ -1,5 +1,4 @@
 import { NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -87,60 +86,7 @@ export async function GET() {
       return { name, job, power, memo, row: i + 2 };
     }).filter(m => m.name);
 
-    const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-    const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
-    if (!url || !key) return NextResponse.json({ ok: false, error: "SUPABASE_SERVICE_ROLE_KEY 환경변수가 없습니다." }, { status: 500 });
-    const admin = createClient(url, key, { auth: { autoRefreshToken: false, persistSession: false } });
-
-    const payloads: Array<Record<string, unknown>> = members.map((m) => {
-      const payload: Record<string, unknown> = { name: m.name, job: m.job, power: m.power };
-      // 빈 메모리는 기존 웹 메모리를 지우지 않습니다.
-      if (m.memo) payload.memo = m.memo;
-      return payload;
-    });
-
-    // 행마다 SELECT -> UPDATE/INSERT 하던 기존 방식은 길드원이 많을수록 매우 느렸습니다.
-    // Supabase bulk upsert 한 번으로 처리해 동기화 시간을 크게 줄입니다.
-    let syncError: string | null = null;
-    if (payloads.length) {
-      // 정상적인 경우에는 이름 unique key를 이용한 bulk upsert 한 번으로 끝냅니다.
-      const result = await admin.from("members").upsert(payloads, { onConflict: "name" });
-      if (result.error) {
-        // 기존 DB가 오래된 스키마이거나 members_name_unique 인덱스가 실제
-        // constraint로 인식되지 않는 경우에도 시트 동기화가 막히지 않도록
-        // 기존 회원은 id 기준 일괄 UPDATE, 신규 회원은 일괄 INSERT 합니다.
-        const names = payloads.map(p => String(p.name));
-        const { data: existingMembers, error: lookupError } = await admin
-          .from("members")
-          .select("id,name")
-          .in("name", names);
-
-        if (lookupError) {
-          syncError = `길드원 저장 실패: ${result.error.message} / 기존 회원 조회 실패: ${lookupError.message}`;
-        } else {
-          const existingByName = new Map((existingMembers || []).map(m => [m.name, m.id]));
-          const updates = payloads.filter(p => existingByName.has(String(p.name)));
-          const inserts = payloads.filter(p => !existingByName.has(String(p.name)));
-          const updateResults = await Promise.all(updates.map(p =>
-            admin.from("members").update({ job: p.job, power: p.power, ...(p.memo ? { memo: p.memo } : {}) }).eq("id", existingByName.get(String(p.name))!)
-          ));
-          const updateError = updateResults.find(r => r.error)?.error;
-          const insertResult = inserts.length ? await admin.from("members").insert(inserts) : { error: null };
-          if (updateError || insertResult.error) {
-            syncError = `길드원 저장 실패: ${updateError?.message || insertResult.error?.message || result.error.message}`;
-          }
-        }
-      }
-    }
-    if (syncError) {
-      return NextResponse.json({
-        ok: false,
-        error: syncError,
-        synced: 0,
-        rows: members.length,
-        sheet: { id: SHEET_ID, gid: SHEET_GID },
-      }, { status: 500 });
-    }
+    // 길드원은 Google Sheets를 원본으로 사용합니다. Supabase에는 저장하지 않습니다.
     const synced = members.length;
 
     return NextResponse.json({ ok: true, synced, rows: members.length, members, sheet: { id: SHEET_ID, gid: SHEET_GID }, columns: { name: headers[nameIdx] ?? "", job: jobIdx >= 0 ? headers[jobIdx] : "찾지 못함", power: headers[powerIdx] ?? "", memo: memoIdx >= 0 ? headers[memoIdx] : "없음" }, jobValues: [...new Set(members.map(m => m.job).filter(Boolean))].slice(0, 30), fetchedAt: new Date().toISOString() });

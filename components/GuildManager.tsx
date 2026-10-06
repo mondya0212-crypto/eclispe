@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { supabase } from "../lib/supabase";
 import {
   CalendarDays, ChevronDown, Dices, LayoutDashboard, Lock, Menu, Pencil, Plus,
   RefreshCw, Search, Swords, Trash2, Trophy, Users, Wallet, X,
@@ -41,6 +40,22 @@ function requireAdmin(): boolean {
 }
 
 const LOCAL_MEMBERS_KEY = "eclipse-members-local-v1";
+const LOCAL_DISTRIBUTIONS_KEY = "eclipse-distributions-local-v1";
+const LOCAL_MEMOS_KEY = "eclipse-memos-local-v1";
+
+function loadLocalJson<T>(key: string, fallback: T): T {
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (!raw) return fallback;
+    return JSON.parse(raw) as T;
+  } catch {
+    return fallback;
+  }
+}
+
+function saveLocalJson<T>(key: string, value: T) {
+  try { window.localStorage.setItem(key, JSON.stringify(value)); } catch {}
+}
 
 async function loadSheetBossRecords(): Promise<BossRecord[]> {
   const response = await fetch(`/api/google-sheet/boss-records?_ts=${Date.now()}`, { cache: "no-store" });
@@ -120,8 +135,9 @@ export default function GuildManager() {
   const [data, setData] = useState<AppData>({ members: [], records: [], distributions: [], memos: [], attendance: [] });
   const [loading, setLoading] = useState(true);
 
-  // 중복 Supabase 조회 방지용 잠금입니다.
+  // 중복 Google Sheets 조회 방지용 잠금입니다.
   const refreshInProgressRef = useRef(false);
+  const localStorageHydratedRef = useRef(false);
 
   const refreshDataSilently = async () => {
     if (refreshInProgressRef.current) return;
@@ -147,11 +163,27 @@ export default function GuildManager() {
   };
 
   useEffect(() => {
-    // 긴급 무-Supabase 모드: 길드원은 백업 JSON, 보스 기록은 Google Sheets를 원본으로 사용합니다.
+    // 분배금과 관리자 메모는 Google Sheets/Supabase와 무관하게 이 브라우저에만 저장합니다.
+    setData(d => ({
+      ...d,
+      distributions: loadLocalJson<DistributionRecord[]>(LOCAL_DISTRIBUTIONS_KEY, []),
+      memos: loadLocalJson<AdminMemo[]>(LOCAL_MEMOS_KEY, []),
+    }));
+    localStorageHydratedRef.current = true;
     void refreshDataSilently().catch(error => {
       window.alert(error instanceof Error ? error.message : "Google Sheets 데이터를 불러오지 못했습니다.");
     }).finally(() => setLoading(false));
   }, []);
+
+  useEffect(() => {
+    if (!localStorageHydratedRef.current) return;
+    saveLocalJson(LOCAL_DISTRIBUTIONS_KEY, data.distributions);
+  }, [data.distributions]);
+
+  useEffect(() => {
+    if (!localStorageHydratedRef.current) return;
+    saveLocalJson(LOCAL_MEMOS_KEY, data.memos);
+  }, [data.memos]);
 
   const title = menus.find(m => m.key === active)?.label || "대시보드";
   return <div className="app">
@@ -295,7 +327,7 @@ function Members({ data, setData }: { data: AppData; setData: React.Dispatch<Rea
   };
 
   return <div className="stack">
-    <PageIntro title="👥 길드원 목록" desc="Supabase 없이 백업 JSON을 사용합니다. 메모/길드원 수정은 현재 사용 중인 브라우저에 임시 저장됩니다." badge="OFFLINE BACKUP" />
+    <PageIntro title="👥 길드원 목록" desc="Google Sheets를 원본으로 사용합니다. 길드원 수정과 메모는 현재 사용 중인 브라우저에 저장됩니다." badge="OFFLINE BACKUP" />
     <div className="panel add-member-panel">
       <div className="panel-title"><span>➕ 길드원 등록 <small className="free-register-badge">비밀번호 없이 등록 가능</small></span></div>
       <div className="form-grid member-add-grid">
@@ -364,7 +396,7 @@ function BossRecords({ data }: { data: AppData; setData: React.Dispatch<React.Se
       </div>
     </div>
     <div className="panel table-panel"><div className="table-wrap"><table className="boss-table"><thead><tr><th>날짜</th><th>젠 시간</th><th>보스</th><th>총인원</th><th>점수</th><th>참여자</th></tr></thead><tbody>{records.map(r => <tr key={r.id}><td>{r.date}</td><td>{r.spawn_time || "-"}</td><td className="strong">{r.boss}</td><td>{r.total_count ?? r.participants.length}명</td><td>{formatNumber(r.score)}</td><td>{r.participants?.length ? r.participants.join(", ") : "-"}</td></tr>)}</tbody></table></div>{!records.length && <Empty text="Google Sheets에서 보스 참여 기록을 찾지 못했습니다." />}</div>
-    <div className="panel"><div className="panel-title"><span>💡 사용 방법</span></div><p className="muted">Google Sheets의 ‘출석 기록’ 탭을 수정한 다음 오른쪽 위의 ↻ 버튼을 누르세요. 이 화면은 Supabase에 보스 기록을 저장하지 않으므로 Realtime 메시지/DB 저장량을 발생시키지 않습니다.</p></div>
+    <div className="panel"><div className="panel-title"><span>💡 사용 방법</span></div><p className="muted">Google Sheets의 ‘출석 기록’ 탭을 수정한 다음 오른쪽 위의 ↻ 버튼을 누르세요. 보스 기록은 Google Sheets에서 읽기만 합니다.</p></div>
   </div>;
 }
 
@@ -414,34 +446,27 @@ function Distribution({ data, setData }: { data: AppData; setData: React.Dispatc
     if (!existing) return;
     const newAmount = row.amount + bonus;
     if (newAmount <= 0) return;
-    const { data: updated, error } = await supabase.from("distribution_records").update({ amount: newAmount }).eq("id", existing.id).select().single();
-    if (error) return window.alert(`추가 금액 수정 실패: ${error.message}`);
-    setData(d => ({ ...d, distributions: d.distributions.map(r => r.id === existing.id ? updated as DistributionRecord : r) }));
+    setData(d => ({ ...d, distributions: d.distributions.map(r => r.id === existing.id ? { ...r, amount: newAmount } : r) }));
   };
 
   const payMember = async (row: typeof rows[number]) => {
     if (row.amount <= 0) return window.alert("분배할 금액이 없습니다. 먼저 보스 참여 기록을 확인해주세요.");
     setSaving(true);
     const existing = paidByName.get(row.member.name);
-    let result;
     if (existing) {
-      result = await supabase.from("distribution_records").delete().eq("id", existing.id);
+      setData(d => ({ ...d, distributions: d.distributions.filter(r => r.id !== existing.id) }));
     } else {
-      result = await supabase.from("distribution_records").insert({
+      const record: DistributionRecord = {
+        id: `local-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
         date: new Date().toISOString().slice(0, 10),
         recipient: row.member.name,
         amount: row.amount + bonusFor(row),
         reason: "분배금 정산",
         memo: settlementMemo,
-      }).select().single();
+      };
+      setData(d => ({ ...d, distributions: [record, ...d.distributions] }));
     }
     setSaving(false);
-    if (result.error) return window.alert(`처리 실패: ${result.error.message}`);
-    if (existing) {
-      setData(d => ({ ...d, distributions: d.distributions.filter(r => r.id !== existing.id) }));
-    } else {
-      setData(d => ({ ...d, distributions: [result.data as DistributionRecord, ...d.distributions] }));
-    }
   };
 
   const resetSettlement = async () => {
@@ -449,10 +474,8 @@ function Distribution({ data, setData }: { data: AppData; setData: React.Dispatc
     if (!requireAdmin()) return;
     if (!window.confirm("현재 분배금 정산 상태를 모두 초기화할까요?")) return;
     setSaving(true);
-    const { error } = await supabase.from("distribution_records").delete().eq("memo", settlementMemo);
-    setSaving(false);
-    if (error) return window.alert(`초기화 실패: ${error.message}`);
     setData(d => ({ ...d, distributions: d.distributions.filter(r => r.memo !== settlementMemo) }));
+    setSaving(false);
   };
 
   return <div className="stack distribution-settlement-page">
@@ -592,22 +615,18 @@ function MemoManager({ data, setData }: { data: AppData; setData: React.Dispatch
     if (!content.trim()) return window.alert("내용을 입력해주세요.");
     if (!requireAdmin()) return;
     setSaving(true);
-    const payload = { title: title.trim(), content: content.trim(), updated_at: new Date().toISOString() };
-    const result = editing
-      ? await supabase.from("admin_memos").update(payload).eq("id", editing.id).select().single()
-      : await supabase.from("admin_memos").insert({ ...payload, created_at: new Date().toISOString() }).select().single();
-    setSaving(false);
-    if (result.error) return window.alert(`게시글 저장 실패: ${result.error.message}`);
-    const saved = result.data as AdminMemo;
+    const now = new Date().toISOString();
+    const saved: AdminMemo = editing
+      ? { ...editing, title: title.trim(), content: content.trim(), updated_at: now }
+      : { id: `local-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, title: title.trim(), content: content.trim(), created_at: now, updated_at: now };
     setData(d => ({ ...d, memos: editing ? d.memos.map(m => m.id === editing.id ? saved : m) : [saved, ...d.memos] }));
+    setSaving(false);
     closeEditor();
   };
 
   const remove = async (memo: AdminMemo) => {
     if (!requireAdmin()) return;
     if (!window.confirm("이 게시글을 삭제할까요?")) return;
-    const { error } = await supabase.from("admin_memos").delete().eq("id", memo.id);
-    if (error) return window.alert(`삭제 실패: ${error.message}`);
     setData(d => ({ ...d, memos: d.memos.filter(m => m.id !== memo.id) }));
   };
 
