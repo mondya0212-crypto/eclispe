@@ -129,6 +129,19 @@ function saveLocalMembers(members: Member[]) {
   window.localStorage.setItem(LOCAL_MEMBERS_KEY, JSON.stringify(members));
 }
 
+function weekStartDate(value: string): string {
+  const d = new Date(`${String(value).slice(0, 10)}T12:00:00`);
+  if (Number.isNaN(d.getTime())) return "";
+  const day = (d.getDay() + 6) % 7; // Monday = 0
+  d.setDate(d.getDate() - day);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+function weekLabel(start: string): string {
+  const d = new Date(`${start}T12:00:00`);
+  d.setDate(d.getDate() + 6);
+  return `${start} ~ ${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
 function formatNumber(value: number) { return Number(value || 0).toLocaleString("ko-KR"); }
 function totalPower(m: Member) { return Number(m.power) || 0; }
 
@@ -410,23 +423,32 @@ function Members({ data, setData }: { data: AppData; setData: React.Dispatch<Rea
 }
 
 function BossRecords({ data }: { data: AppData; setData: React.Dispatch<React.SetStateAction<AppData>> }) {
+  const [selectedWeek, setSelectedWeek] = useState("all");
   const [selectedDate, setSelectedDate] = useState("");
-  const records = useMemo(() => sortBossRecords(data.records).filter(r => !selectedDate || r.date === selectedDate), [data.records, selectedDate]);
-  const dates = useMemo(() => [...new Set(sortBossRecords(data.records).map(r => r.date))], [data.records]);
+  const weeks = useMemo(() => [...new Set(data.records.map(r => weekStartDate(r.date)).filter(Boolean))].sort().reverse(), [data.records]);
+  const records = useMemo(() => sortBossRecords(data.records).filter(r =>
+    (selectedWeek === "all" || weekStartDate(r.date) === selectedWeek) &&
+    (!selectedDate || r.date === selectedDate)
+  ), [data.records, selectedWeek, selectedDate]);
+  const dates = useMemo(() => [...new Set(data.records.filter(r => selectedWeek === "all" || weekStartDate(r.date) === selectedWeek).map(r => r.date))].sort().reverse(), [data.records, selectedWeek]);
   return <div className="stack">
-    <PageIntro title="⚔️ 보스 참여 기록" desc="Google Sheets의 출석 기록을 원본으로 사용합니다. 시트에서 수정한 뒤 오른쪽 위 새로고침 버튼을 누르면 반영됩니다." badge="GOOGLE SHEETS" />
+    <PageIntro title="⚔️ 보스 참여 기록" desc="기록을 초기화하지 않고 주차별로 확인할 수 있습니다. 주간 기준은 월요일~일요일입니다." badge="GOOGLE SHEETS" />
     <div className="panel">
-      <div className="panel-title"><span>📊 시트 연동 현황</span><span className="muted">총 {data.records.length}건</span></div>
+      <div className="panel-title"><span>📊 시트 연동 현황</span><span className="muted">표시 {records.length}건 · 전체 {data.records.length}건</span></div>
       <div className="form-grid boss-form">
+        <select value={selectedWeek} onChange={e => { setSelectedWeek(e.target.value); setSelectedDate(""); }}>
+          <option value="all">전체 주차</option>
+          {weeks.map(week => <option key={week} value={week}>{weekLabel(week)}</option>)}
+        </select>
         <select value={selectedDate} onChange={e => setSelectedDate(e.target.value)}>
-          <option value="">전체 날짜</option>
+          <option value="">해당 주 전체 날짜</option>
           {dates.map(date => <option key={date} value={date}>{date}</option>)}
         </select>
         <div className="panel-note">참여자: A열 · 참여시간: B열 · 보스명: C열 · 총인원: D열 · 참여점수: E열 · 젠시간: F열</div>
       </div>
     </div>
-    <div className="panel table-panel"><div className="table-wrap"><table className="boss-table"><thead><tr><th>날짜</th><th>젠 시간</th><th>보스</th><th>총인원</th><th>점수</th><th>참여자</th></tr></thead><tbody>{records.map(r => <tr key={r.id}><td>{r.date}</td><td>{r.spawn_time || "-"}</td><td className="strong">{r.boss}</td><td>{r.total_count ?? r.participants.length}명</td><td>{formatNumber(r.score)}</td><td>{r.participants?.length ? r.participants.join(", ") : "-"}</td></tr>)}</tbody></table></div>{!records.length && <Empty text="Google Sheets에서 보스 참여 기록을 찾지 못했습니다." />}</div>
-    <div className="panel"><div className="panel-title"><span>💡 사용 방법</span></div><p className="muted">Google Sheets의 ‘출석 기록’ 탭을 수정한 다음 오른쪽 위의 ↻ 버튼을 누르세요. 보스 기록은 Google Sheets에서 읽기만 합니다.</p></div>
+    <div className="panel table-panel"><div className="table-wrap"><table className="boss-table"><thead><tr><th>날짜</th><th>젠 시간</th><th>보스</th><th>총인원</th><th>점수</th><th>참여자</th></tr></thead><tbody>{records.map(r => <tr key={r.id}><td>{r.date}</td><td>{r.spawn_time || "-"}</td><td className="strong">{r.boss}</td><td>{r.total_count ?? r.participants.length}명</td><td>{formatNumber(r.score)}</td><td>{r.participants?.length ? r.participants.join(", ") : "-"}</td></tr>)}</tbody></table></div>{!records.length && <Empty text="선택한 주차에 보스 참여 기록이 없습니다." />}</div>
+    <div className="panel"><div className="panel-title"><span>💡 기록 보관 안내</span></div><p className="muted">기존 기록은 삭제하거나 초기화하지 않습니다. 주차를 바꾸면 해당 기간의 기록만 필터링해서 보여줍니다.</p></div>
   </div>;
 }
 
@@ -592,11 +614,44 @@ function Distribution({ data, setData }: { data: AppData; setData: React.Dispatc
 }
 
 function Stats({ data }: { data: AppData }) {
-  const total = data.records.length;
-  const rows = data.members.map(m => ({ name: m.name, count: data.records.filter(r => r.participants.includes(m.name)).length, attendance: data.attendance.filter(a => a.member_name === m.name && a.status === "present").length })).sort((a, b) => b.count - a.count);
-  const today = new Date().toISOString().slice(0, 10);
-  const todayAttendance = data.attendance.filter(a => a.attendance_date === today && a.status === "present");
-  return <div className="stack"><PageIntro title="📅 참여율 기록" desc="보스 참여율과 Discord 출석 현황을 확인합니다." /><div className="cards cards-3"><StatCard icon={<CalendarDays />} label="전체 보스 기록" value={`${total}건`} /><StatCard icon={<Users />} label="전체 보스 참여" value={`${data.records.reduce((a, r) => a + r.participants.length, 0)}회`} /><StatCard icon={<CalendarDays />} label="오늘 Discord 출석" value={`${todayAttendance.length}명`} accent="pink" /></div><div className="panel"><div className="panel-title"><span>길드원별 참여 현황</span></div><div className="table-wrap"><table className="stats-table"><thead><tr><th>길드원</th><th>보스 참여</th><th>참여율</th><th>Discord 출석</th></tr></thead><tbody>{rows.map(r => <tr key={r.name}><td className="strong">{r.name}</td><td>{r.count}회</td><td><div className="mini-rate"><span>{total ? Math.round(r.count / total * 100) : 0}%</span><i style={{ width: `${total ? Math.min(100, r.count / total * 100) : 0}%` }} /></div></td><td>{r.attendance}회</td></tr>)}</tbody></table></div>{!rows.length && <Empty text="길드원을 등록하면 참여율이 표시됩니다." />}</div><div className="panel"><div className="panel-title"><span>🤖 최근 Discord 출석</span><span className="muted">최근 30건</span></div>{data.attendance.length ? <div className="table-wrap"><table className="stats-table"><thead><tr><th>날짜</th><th>출석 시간</th><th>길드원</th><th>Discord</th><th>상태</th></tr></thead><tbody>{data.attendance.slice(0,30).map(a => <tr key={a.id}><td>{a.attendance_date}</td><td className="strong">{a.attendance_time || "-"}</td><td>{a.member_name}</td><td>{a.discord_display_name || "-"}</td><td><span className="status-chip paid">출석</span></td></tr>)}</tbody></table></div> : <Empty text="Discord에서 출석한 기록이 없습니다." />}</div></div>;
+  const [selectedWeek, setSelectedWeek] = useState("current");
+  const today = new Date();
+  const todayText = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
+  const currentWeek = weekStartDate(todayText);
+  const weeks = useMemo(() => [...new Set([
+    ...data.records.map(r => weekStartDate(r.date)),
+    ...data.attendance.map(a => weekStartDate(a.attendance_date)),
+    currentWeek,
+  ].filter(Boolean))].sort().reverse(), [data.records, data.attendance, currentWeek]);
+  const activeWeek = selectedWeek === "current" ? currentWeek : selectedWeek;
+  const weeklyRecords = data.records.filter(r => weekStartDate(r.date) === activeWeek);
+  const weeklyAttendance = data.attendance.filter(a => weekStartDate(a.attendance_date) === activeWeek && a.status === "present");
+  const total = weeklyRecords.length;
+  const rows = data.members.map(m => ({
+    name: m.name,
+    count: weeklyRecords.filter(r => r.participants.includes(m.name)).length,
+    attendance: weeklyAttendance.filter(a => a.member_name === m.name).length
+  })).sort((a, b) => b.count - a.count);
+  const todayAttendance = data.attendance.filter(a => a.attendance_date === todayText && a.status === "present");
+  return <div className="stack">
+    <PageIntro title="📅 참여율 기록" desc="주차별 보스 참여율과 Discord 출석 현황을 조회합니다. 기록은 초기화되지 않고 누적 보관됩니다." />
+    <div className="panel">
+      <div className="panel-title"><span>🗓️ 조회 주차</span></div>
+      <div className="form-grid boss-form">
+        <select value={selectedWeek === "current" ? currentWeek : selectedWeek} onChange={e => setSelectedWeek(e.target.value)}>
+          {weeks.map(week => <option key={week} value={week}>{week === currentWeek ? `이번 주 · ${weekLabel(week)}` : weekLabel(week)}</option>)}
+        </select>
+        <span className="panel-note">월요일~일요일 기준 · 선택한 주차의 기록만 집계합니다.</span>
+      </div>
+    </div>
+    <div className="cards cards-3">
+      <StatCard icon={<CalendarDays />} label="주간 보스 기록" value={`${total}건`} />
+      <StatCard icon={<Users />} label="주간 보스 참여" value={`${weeklyRecords.reduce((a, r) => a + r.participants.length, 0)}회`} />
+      <StatCard icon={<CalendarDays />} label="오늘 Discord 출석" value={`${todayAttendance.length}명`} accent="pink" />
+    </div>
+    <div className="panel"><div className="panel-title"><span>길드원별 주간 참여 현황</span><span className="muted">{weekLabel(activeWeek)}</span></div><div className="table-wrap"><table className="stats-table"><thead><tr><th>길드원</th><th>보스 참여</th><th>주간 참여율</th><th>Discord 출석</th></tr></thead><tbody>{rows.map(r => <tr key={r.name}><td className="strong">{r.name}</td><td>{r.count}회</td><td><div className="mini-rate"><span>{total ? Math.round(r.count / total * 100) : 0}%</span><i style={{ width: `${total ? Math.min(100, r.count / total * 100) : 0}%` }} /></div></td><td>{r.attendance}회</td></tr>)}</tbody></table></div>{!rows.length && <Empty text="길드원을 등록하면 참여율이 표시됩니다." />}</div>
+    <div className="panel"><div className="panel-title"><span>🤖 선택 주차 Discord 출석</span><span className="muted">{weeklyAttendance.length}건 · 최근 기록 순</span></div>{weeklyAttendance.length ? <div className="table-wrap"><table className="stats-table"><thead><tr><th>날짜</th><th>출석 시간</th><th>길드원</th><th>Discord</th><th>상태</th></tr></thead><tbody>{[...weeklyAttendance].sort((a,b) => `${b.attendance_date} ${b.attendance_time || ""}`.localeCompare(`${a.attendance_date} ${a.attendance_time || ""}`)).map(a => <tr key={a.id}><td>{a.attendance_date}</td><td className="strong">{a.attendance_time || "-"}</td><td>{a.member_name}</td><td>{a.discord_display_name || "-"}</td><td><span className="status-chip paid">출석</span></td></tr>)}</tbody></table></div> : <Empty text="선택한 주차의 Discord 출석 기록이 없습니다." />}</div>
+  </div>;
 }
 
 function MemoManager({ data, setData }: { data: AppData; setData: React.Dispatch<React.SetStateAction<AppData>> }) {
