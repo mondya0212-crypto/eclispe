@@ -16,11 +16,12 @@ type AdminMemo = { id: string; title: string; content: string; created_at: strin
 type Attendance = { id: string; member_name: string; discord_user_id?: string | null; discord_display_name?: string | null; attendance_date: string; attendance_time?: string | null; status: string; source: string; created_at: string };
 type AppData = { members: Member[]; records: BossRecord[]; distributions: DistributionRecord[]; memos: AdminMemo[]; attendance: Attendance[] };
 
-type MenuKey = "dashboard" | "members" | "boss" | "distribution" | "stats" | "memo" | "ladder";
+type MenuKey = "dashboard" | "members" | "boss" | "war" | "distribution" | "stats" | "memo" | "ladder";
 const menus: { key: MenuKey; label: string; icon: typeof Users }[] = [
   { key: "dashboard", label: "대시보드", icon: LayoutDashboard },
   { key: "members", label: "길드원 목록", icon: Users },
   { key: "boss", label: "보스 참여 기록", icon: Swords },
+  { key: "war", label: "쟁 출석 기록", icon: Swords },
   { key: "distribution", label: "분배금 내역", icon: Wallet },
   { key: "stats", label: "참여율 기록", icon: CalendarDays },
   { key: "memo", label: "관리자 메모", icon: Pencil },
@@ -251,6 +252,7 @@ export default function GuildManager() {
           {active === "dashboard" && <Dashboard data={data} />}
           {active === "members" && <Members data={data} setData={setData} />}
           {active === "boss" && <BossRecords data={data} setData={setData} />}
+          {active === "war" && <WarAttendance />}
           {active === "distribution" && <Distribution data={data} setData={setData} />}
           {active === "stats" && <Stats data={data} />}
           {active === "memo" && <MemoManager data={data} setData={setData} />}
@@ -449,6 +451,90 @@ function BossRecords({ data }: { data: AppData; setData: React.Dispatch<React.Se
     </div>
     <div className="panel table-panel"><div className="table-wrap"><table className="boss-table"><thead><tr><th>날짜</th><th>젠 시간</th><th>보스</th><th>총인원</th><th>점수</th><th>참여자</th></tr></thead><tbody>{records.map(r => <tr key={r.id}><td>{r.date}</td><td>{r.spawn_time || "-"}</td><td className="strong">{r.boss}</td><td>{r.total_count ?? r.participants.length}명</td><td>{formatNumber(r.score)}</td><td>{r.participants?.length ? r.participants.join(", ") : "-"}</td></tr>)}</tbody></table></div>{!records.length && <Empty text="선택한 주차에 보스 참여 기록이 없습니다." />}</div>
     <div className="panel"><div className="panel-title"><span>💡 기록 보관 안내</span></div><p className="muted">기존 기록은 삭제하거나 초기화하지 않습니다. 주차를 바꾸면 해당 기간의 기록만 필터링해서 보여줍니다.</p></div>
+  </div>;
+}
+
+
+type WarAttendanceRow = {
+  id: string; nickname: string; attendedAt: string; attendedDate: string; attendedTime: string;
+  category: string; totalCount: number; score: number; warStartAt: string;
+  warStartDate: string; warStartTime: string; sheetRow: number;
+};
+
+function WarAttendance() {
+  const [records, setRecords] = useState<WarAttendanceRow[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [category, setCategory] = useState("all");
+  const [query, setQuery] = useState("");
+  const [selectedDate, setSelectedDate] = useState("all");
+  const [fetchedAt, setFetchedAt] = useState("");
+
+  const refresh = async () => {
+    setLoading(true);
+    setError("");
+    try {
+      const response = await fetch(`/api/google-sheet/war-attendance?_ts=${Date.now()}`, { cache: "no-store" });
+      const payload = await response.json();
+      if (!response.ok || !payload?.ok) throw new Error(payload?.error || `쟁 출석 기록 로드 실패 (${response.status})`);
+      setRecords(Array.isArray(payload.records) ? payload.records : []);
+      setFetchedAt(payload.fetchedAt || "");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "쟁 출석 기록을 불러오지 못했습니다.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => { void refresh(); }, []);
+
+  const categories = [...new Set(records.map(r => r.category).filter(Boolean))];
+  const dates = [...new Set(records.map(r => r.warStartDate || r.attendedDate).filter(Boolean))].sort().reverse();
+  const filtered = records.filter(r =>
+    (category === "all" || r.category === category) &&
+    (selectedDate === "all" || (r.warStartDate || r.attendedDate) === selectedDate) &&
+    (!query.trim() || r.nickname.toLowerCase().includes(query.trim().toLowerCase()))
+  );
+  const uniqueWarCount = new Set(records.map(r => `${r.warStartAt}|${r.category}`)).size;
+  const uniqueMembers = new Set(records.map(r => r.nickname)).size;
+
+  return <div className="stack">
+    <PageIntro title="⚔️ 쟁 출석 기록" desc="쟁 출석 전용 Google Sheets 탭의 기록을 확인합니다. 시트에 행이 추가되면 새로고침으로 최신 기록을 불러올 수 있습니다." badge="GOOGLE SHEETS" />
+    <div className="cards cards-3">
+      <StatCard icon={<Swords />} label="전체 출석 기록" value={`${records.length}건`} />
+      <StatCard icon={<CalendarDays />} label="쟁 진행 기록" value={`${uniqueWarCount}회`} />
+      <StatCard icon={<Users />} label="참여 닉네임" value={`${uniqueMembers}명`} accent="pink" />
+    </div>
+    <div className="panel">
+      <div className="panel-title">
+        <span>📊 쟁 출석 시트 연동</span>
+        <button className="refresh" onClick={() => void refresh()} disabled={loading}><RefreshCw size={15} /> {loading ? "불러오는 중" : "시트 새로고침"}</button>
+      </div>
+      <div className="form-grid boss-form">
+        <input value={query} onChange={e => setQuery(e.target.value)} placeholder="닉네임 검색" />
+        <select value={category} onChange={e => setCategory(e.target.value)}>
+          <option value="all">전체 구분</option>
+          {categories.map(v => <option key={v} value={v}>{v}</option>)}
+        </select>
+        <select value={selectedDate} onChange={e => setSelectedDate(e.target.value)}>
+          <option value="all">전체 쟁 날짜</option>
+          {dates.map(v => <option key={v} value={v}>{v}</option>)}
+        </select>
+      </div>
+      <p className="panel-note">연동 열: A 참여 닉네임 · B 참여 시간 · C 구분 · D 총인원 · E 참여 점수 · F 쟁 시작 시간</p>
+      {fetchedAt && <p className="panel-note">최근 조회: {new Date(fetchedAt).toLocaleString("ko-KR")}</p>}
+      {error && <p className="panel-note" style={{color:"#ef6b83"}}>{error}</p>}
+    </div>
+    <div className="panel table-panel">
+      <div className="panel-title"><span>쟁 출석 내역</span><span className="muted">{filtered.length}건 표시</span></div>
+      <div className="table-wrap"><table className="stats-table"><thead><tr><th>쟁 시작 시간</th><th>참여 닉네임</th><th>참여 시간</th><th>구분</th><th>총인원</th><th>참여 점수</th></tr></thead>
+        <tbody>{filtered.map(r => <tr key={r.id}>
+          <td>{r.warStartAt || "-"}</td><td className="strong">{r.nickname}</td><td>{r.attendedAt || "-"}</td>
+          <td>{r.category || "-"}</td><td>{r.totalCount || "-"}</td><td>{r.score || "-"}</td>
+        </tr>)}</tbody></table></div>
+      {!loading && !error && !filtered.length && <Empty text="조건에 맞는 쟁 출석 기록이 없습니다." />}
+      {loading && <Empty text="쟁 출석 기록을 불러오는 중입니다." />}
+    </div>
   </div>;
 }
 
